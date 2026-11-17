@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DeepFish</string>
+    <string name="title_activity_main">DeepFish</string>
+    <string name="package_name">com.xiaolan.deepseek</string>
+    <string name="custom_url_scheme">com.xiaolan.deepseek</string>
+</resources>
