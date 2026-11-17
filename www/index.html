@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<meta name="description" content="DeepFish —— 可以自定义角色的 DeepSeek 手机客户端">
+<meta name="format-detection" content="telephone=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DeepFish">
+<title>DeepFish</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon-180.png">
+<link rel="stylesheet" href="css/app.css">
+<script>
+/* 启动诊断：任何脚本/运行时错误都会显示在屏幕顶部 */
+(function () {
+  window.__fatal = function (msg) {
+    try {
+      var el = document.getElementById("fatalBar");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "fatalBar";
+        el.setAttribute("style",
+          "position:fixed;left:0;right:0;top:0;z-index:99999;background:#7f1d1d;color:#fecaca;" +
+          "font:12px/1.55 monospace;padding:8px 10px;max-height:46vh;overflow:auto;" +
+          "white-space:pre-wrap;word-break:break-all");
+        (document.body || document.documentElement).appendChild(el);
+      }
+      el.textContent = msg;
+    } catch (e) { }
+  };
+  window.addEventListener("error", function (e) {
+    if (e.target && e.target.tagName === "SCRIPT") {
+      window.__fatal("脚本加载失败：" + (e.target.src || "unknown"));
+      return;
+    }
+    window.__fatal("运行错误：" + (e.message || e.type) +
+      "\n@" + String(e.filename || "").split("/").pop() + ":" + e.lineno);
+  }, true);
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    window.__fatal("异步错误：" + ((r && r.message) || String(r)));
+  });
+  window.__bootTimer = setTimeout(function () {
+    var m = document.getElementById("messages");
+    if (!m || m.children.length === 0) {
+      window.__fatal("启动超时：2.6 秒内没有渲染出界面。\n请把本段文字截图反馈。");
+    }
+  }, 2600);
+})();
+</script>
+</head>
+<body>
+
+<!-- ============ 主界面 ============ -->
+<div class="app" id="app">
+
+  <header class="topbar">
+    <button class="icon-btn" id="btnMenu" type="button" aria-label="会话列表">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h11"/></svg>
+    </button>
+
+    <button class="topbar-mid" id="btnPersona" type="button" aria-label="角色设定">
+      <img class="top-avatar" id="topAvatar" src="icons/avatar-256.png" alt="">
+      <span class="top-text">
+        <span class="topbar-title" id="chatTitle">新对话</span>
+        <span class="topbar-sub">
+          <span class="dot"></span>
+          <span id="personaNameTop">DeepFish</span>
+          <span class="sep">·</span>
+          <span id="modelName">DeepSeek</span>
+        </span>
+      </span>
+    </button>
+
+    <button class="icon-btn" id="btnAutoRead" type="button" aria-label="自动朗读" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/></svg>
+    </button>
+
+    <button class="icon-btn" id="btnNew" type="button" aria-label="新建对话">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <main class="chat" id="chat">
+    <div class="messages" id="messages"></div>
+
+    <button class="scroll-bottom hidden" id="btnScrollBottom" type="button" aria-label="回到底部">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+    </button>
+  </main>
+
+  <footer class="composer" id="composer">
+    <div class="composer-box" id="composerBox">
+      <div class="attach-strip" id="attachStrip" hidden></div>
+      <textarea id="input" rows="1" placeholder="发消息…" enterkeyhint="send"
+                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+      <div class="composer-bar">
+        <button class="pill" id="btnThink" type="button" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M18.5 16.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/></svg>
+          <span>深度思考</span>
+        </button>
+        <button class="pill" id="btnSearch" type="button" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3z"/></svg>
+          <span>智能搜索</span>
+        </button>
+        <span class="flex-spacer"></span>
+        <button class="round-icon" id="btnAttach" type="button" aria-label="添加图片或文件">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button class="send-btn" id="btnSend" type="button" aria-label="发送">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        </button>
+        <button class="send-btn stop" id="btnStop" type="button" aria-label="停止生成">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2.5"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="composer-hint" id="composerHint"></div>
+  </footer>
+</div>
+
+<!-- ============ 会话抽屉 ============ -->
+<div class="scrim" id="scrim" hidden></div>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div class="drawer-brand">
+      <img src="icons/avatar-256.png" alt="" class="brand-avatar" id="brandAvatar">
+      <div>
+        <div class="brand-name">DeepFish</div>
+        <div class="brand-sub" id="brandSub">DeepSeek 手机助手</div>
+      </div>
+    </div>
+    <button class="icon-btn ghost" id="btnDrawerClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+
+  <div class="drawer-search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+    <input id="searchSessions" type="search" placeholder="搜索对话" autocomplete="off">
+  </div>
+
+  <div class="drawer-list" id="sessionList"></div>
+
+  <div class="drawer-foot">
+    <button class="drawer-item" id="btnImportOpen" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+      <span>导入 DeepSeek 对话</span>
+      <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <button class="drawer-item" id="btnSettings" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 008.6 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 8.6a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      <span>设置与数据</span>
+      <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+  </div>
+</aside>
+
+<!-- ============ 角色设定 ============ -->
+<section class="sheet" id="personaSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn ghost" id="btnPersonaClose" type="button" aria-label="返回">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <h2>角色设定</h2>
+    <span class="ver" id="personaScope">仅当前对话</span>
+  </div>
+
+  <div class="sheet-body">
+    <div class="persona-top">
+      <button class="persona-avatar-btn" id="btnPickAvatar" type="button" aria-label="更换头像">
+        <img id="personaAvatar" src="icons/avatar-256.png" alt="">
+        <span class="avatar-edit">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        </span>
+      </button>
+      <p class="persona-hint">点一下头像，从相册选一张图<br>再自己拖动、缩放框选区域</p>
+    </div>
+
+    <div class="group">
+      <label class="field">
+        <span class="field-label">角色名</span>
+        <input id="personaName" type="text" placeholder="DeepFish" maxlength="20" autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="field-label">角色设定 <em>系统提示词</em></span>
+        <textarea id="personaPrompt" rows="6"
+          placeholder="例如：你叫阿蓝，是一条住在深海的鱼，说话慢条斯理，喜欢用比喻……"></textarea>
+        <span class="field-tip">这段设定只作用于当前对话。写得越具体（身份、语气、口头禅、禁忌），越不容易"出戏"。</span>
+      </label>
+    </div>
+
+    <div class="group">
+      <div class="group-title">聊天背景</div>
+      <div class="bg-preview" id="bgPreview"></div>
+      <div class="btn-grid two">
+        <button class="wide-btn" id="btnPickBg" type="button">选择背景图</button>
+        <button class="wide-btn" id="btnClearBg" type="button">恢复默认</button>
+      </div>
+      <span class="field-tip">背景只作用于当前对话，会随备份一起保存。</span>
+    </div>
+
+    <button class="wide-btn" id="btnResetAvatar" type="button">恢复默认头像</button>
+  </div>
+</section>
+
+<!-- ============ 导入对话 ============ -->
+<section class="sheet" id="importSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn ghost" id="btnImportClose" type="button" aria-label="返回">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <h2>导入对话</h2>
+    <span class="ver">搬到 DeepFish</span>
+  </div>
+
+  <div class="sheet-body">
+    <div class="group">
+      <div class="group-title">方式一 · DeepSeek 官方导出包（最完整）</div>
+      <button class="wide-btn primary" id="btnImportZip" type="button">选择 deepseek_data-*.zip</button>
+      <input id="importZipInput" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden>
+      <span class="field-tip">
+        在 DeepSeek App 的「数据管理 → 导出所有历史对话」里下载 zip，
+        选中后可以一次性把全部对话搬过来，标题、提问、回答、思考都会保留。
+      </span>
+    </div>
+
+    <div class="group">
+      <div class="group-title">方式二 · 粘贴对话文本</div>
+      <textarea id="importText" rows="7"
+        placeholder="把 DeepSeek App 里的对话复制后粘贴到这里。&#10;能识别「你 / DeepSeek / User / Assistant」这类说话人标记；&#10;没有标记时按一问一答交替切分。"></textarea>
+      <button class="wide-btn" id="btnImportText" type="button">解析并预览</button>
+      <div class="import-preview" id="importPreview" hidden></div>
+      <button class="wide-btn primary" id="btnImportConfirm" type="button" hidden>确认导入</button>
+      <span class="field-tip">解析后可以点角色标签纠正「是谁说的」，确认无误再导入。</span>
+    </div>
+
+    <div class="group">
+      <div class="group-title">方式三 · 导入文件</div>
+      <button class="wide-btn" id="btnImportFile" type="button">选择 .json / .txt / .md 文件</button>
+      <input id="importFileInput" type="file" accept=".json,.txt,.md,application/json,text/plain" hidden>
+      <span class="field-tip">支持通用 JSON（role/content 结构）与纯文本，自动识别格式。</span>
+    </div>
+
+    <div class="group">
+      <div class="group-title">方式四 · 分享链接</div>
+      <input id="importUrl" type="url" placeholder="https://chat.deepseek.com/share/..." autocomplete="off" spellcheck="false">
+      <button class="wide-btn" id="btnImportUrl" type="button">尝试抓取</button>
+      <span class="field-tip">分享页有反爬与登录校验，成功率低；建议直接用方式一。</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 头像裁剪 ============ -->
+<section class="cropper" id="cropper" aria-hidden="true">
+  <div class="crop-head">
+    <button class="icon-btn ghost" id="btnCropCancel" type="button" aria-label="取消">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <h2>调整头像</h2>
+    <button class="crop-ok" id="btnCropOk" type="button">完成</button>
+  </div>
+
+  <div class="crop-stage" id="cropStage">
+    <div class="crop-viewport" id="cropViewport">
+      <img id="cropImg" alt="" draggable="false">
+    </div>
+    <div class="crop-ring"></div>
+  </div>
+
+  <div class="crop-panel">
+    <div class="crop-zoom-row">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <input id="cropZoom" type="range" min="1" max="4" step="0.01" value="1">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M16 16l4.5 4.5M11 7v8M7 11h8"/></svg>
+    </div>
+    <p class="crop-tip">拖动图片调整位置，两侧滑块缩放</p>
+    <button class="wide-btn" id="btnCropAnother" type="button">重新选一张</button>
+  </div>
+</section>
+
+<!-- ============ 设置 ============ -->
+<section class="sheet" id="settingsSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn ghost" id="btnSettingsClose" type="button" aria-label="返回">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <h2>设置与数据</h2>
+    <span class="ver" id="appVer"></span>
+  </div>
+
+  <div class="sheet-body">
+
+    <div class="group">
+      <div class="group-title">API 连接</div>
+      <label class="field">
+        <span class="field-label">API Key <em>仅保存在本机</em></span>
+        <div class="field-row">
+          <input id="setApiKey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
+          <button class="mini-btn" id="btnToggleKey" type="button">显示</button>
+        </div>
+      </label>
+      <label class="field">
+        <span class="field-label">接口地址</span>
+        <input id="setBaseUrl" type="url" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">默认模型</span>
+        <div class="seg" id="setModel">
+          <button type="button" data-v="deepseek-flash">flash</button>
+          <button type="button" data-v="deepseek-chat">chat</button>
+          <button type="button" data-v="deepseek-reasoner">reasoner</button>
+        </div>
+        <span class="field-tip">flash 支持思考、联网搜索与图片；chat/reasoner 为旧模型。</span>
+      </label>
+      <button class="wide-btn" id="btnTestConn" type="button">测试连接</button>
+    </div>
+
+    <div class="group">
+      <div class="group-title">新对话的默认角色</div>
+      <label class="field">
+        <span class="field-label">默认角色名</span>
+        <input id="setDefName" type="text" placeholder="DeepFish" maxlength="20" autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="field-label">默认角色设定</span>
+        <textarea id="setSystem" rows="3" placeholder="例如：你是一位简洁专业的助手。"></textarea>
+        <span class="field-tip">只影响之后新建的对话。已有对话可以在顶栏点头像单独改。</span>
+      </label>
+    </div>
+
+    <div class="group">
+      <div class="group-title">朗读</div>
+      <div class="field">
+        <span class="field-label">音色</span>
+        <div class="voice-fixed">暗潮 · 男声</div>
+        <span class="field-tip">
+          使用 DeepSeek 官方 TTS 接口，按字符计费。<br>
+          点回复下方的喇叭可单条朗读；打开顶栏的喇叭会在此基础上自动朗读每一条新回复。
+        </span>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">对话行为</div>
+      <label class="field">
+        <span class="field-label">携带历史消息 <b id="ctxVal">30</b> 条</span>
+        <input id="setCtx" type="range" min="2" max="80" step="2" value="30">
+        <span class="field-tip">调得太小，模型会"忘记"之前的互动、越聊越不像角色；调大更稳，但更费 token。建议 30–50。</span>
+      </label>
+      <label class="field">
+        <span class="field-label">随机性 temperature <b id="tempVal">1.0</b></span>
+        <input id="setTemp" type="range" min="0" max="2" step="0.1" value="1">
+      </label>
+      <label class="field">
+        <span class="field-label">最大回复长度 max_tokens <b id="maxVal">不限</b></span>
+        <input id="setMax" type="range" min="0" max="8192" step="256" value="0">
+      </label>
+    </div>
+
+    <div class="group">
+      <div class="group-title">外观</div>
+      <label class="field">
+        <span class="field-label">主题</span>
+        <div class="seg" id="setTheme">
+          <button type="button" data-v="auto">跟随系统</button>
+          <button type="button" data-v="dark">深色</button>
+          <button type="button" data-v="light">浅色</button>
+        </div>
+      </label>
+      <label class="field">
+        <span class="field-label">字号</span>
+        <div class="seg" id="setFont">
+          <button type="button" data-v="small">小</button>
+          <button type="button" data-v="normal">标准</button>
+          <button type="button" data-v="large">大</button>
+        </div>
+      </label>
+    </div>
+
+    <div class="group">
+      <div class="group-title">数据与备份</div>
+      <div class="stat-row">
+        <div class="stat"><b id="statSessions">0</b><span>对话</span></div>
+        <div class="stat"><b id="statMessages">0</b><span>消息</span></div>
+        <div class="stat"><b id="statSize">0 KB</b><span>占用</span></div>
+      </div>
+      <div class="btn-grid">
+        <button class="wide-btn primary" id="btnExport" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+          导出备份文件
+        </button>
+        <button class="wide-btn" id="btnImport" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9M7 14l5-5 5 5M5 3h14"/></svg>
+          导入备份文件
+        </button>
+      </div>
+      <input id="fileImport" type="file" accept=".json,application/json" hidden>
+      <div class="field-tip spaced">备份为 JSON，含全部对话、角色设定、头像与背景。</div>
+      <label class="switch-row">
+        <span>自动保留本机快照<em>最多 7 份，用于误删恢复</em></span>
+        <input id="setAutoSnap" type="checkbox" checked>
+      </label>
+      <button class="wide-btn danger" id="btnClearAll" type="button">清空全部数据</button>
+    </div>
+
+    <div class="group">
+      <div class="group-title">关于</div>
+      <button class="wide-btn" id="btnCheckUpdate" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 11-3.2-6.9M21 3v6h-6"/></svg>
+        检查更新
+      </button>
+      <p class="about" style="margin-top:12px">
+        DeepFish 是一个 GitHub 免费开源项目，非商用，与 DeepSeek 官方没有任何关系。<br>
+        角色形象由 <b>子午老师</b> 设计，作者已授权非商业使用。<br>
+        数据只保存在这台手机上，接口直连 <code>api.deepseek.com</code>。
+      </p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ 首次启动公告 ============ -->
+<div class="notice" id="notice" hidden>
+  <div class="notice-card">
+    <img class="notice-logo" src="icons/avatar-256.png" alt="">
+    <h2>DeepFish</h2>
+    <p class="notice-sub">一个可自定义角色的 DeepSeek 客户端</p>
+    <div class="notice-body">
+      <p><b>开源与用途</b></p>
+      <p>本项目是一个 <b>GitHub 免费开源项目</b>，仅供个人学习与日常使用，<b>不用于任何商业用途</b>。</p>
+      <p><b>与官方的关系</b></p>
+      <p>DeepFish 是第三方客户端，<b>与 DeepSeek 官方没有任何隶属或合作关系</b>。你使用自己的 API Key，所有费用由你的 DeepSeek 账户结算。</p>
+      <p><b>角色形象</b></p>
+      <p>软件图标与默认头像使用的是 <b>子午老师</b> 设计的男性角色形象，<b>已获得子午老师授权</b>在本项目中使用。</p>
+      <p><b>数据说明</b></p>
+      <p>对话、角色、头像与背景全部保存在本机，不会上传到任何第三方服务器。卸载应用会一并删除，请及时导出备份。</p>
+    </div>
+    <button class="wide-btn primary" id="btnAgree" type="button">我已阅读并同意</button>
+  </div>
+</div>
+
+<!-- ============ 通用弹层 ============ -->
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card">
+    <h3 id="modalTitle"></h3>
+    <p id="modalMsg"></p>
+    <div class="modal-actions">
+      <button class="wide-btn" id="modalCancel" type="button">取消</button>
+      <button class="wide-btn primary" id="modalOk" type="button">确定</button>
+    </div>
+  </div>
+</div>
+
+<input id="avatarFile" type="file" accept="image/*" hidden>
+<input id="bgFile" type="file" accept="image/*" hidden>
+<input id="attachFile" type="file" multiple hidden
+  accept="image/*,.txt,.md,.json,.csv,.log,.js,.ts,.py,.java,.c,.cpp,.html,.css,.xml,.yaml,.yml,.ini,.conf,.sh">
+
+<script src="js/md.js"></script>
+<script src="js/dszip.js"></script>
+<script src="js/store.js"></script>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

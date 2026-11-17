@@ -1,0 +1,81 @@
+NOTICE
+======
+
+DeepFish
+Copyright (c) 2026 DeepFish contributors
+
+This project contains two kinds of material under two different sets of terms.
+Read both before reusing anything.
+
+
+1. Code — MIT
+-------------
+
+Everything except the artwork listed in section 2 is released under the MIT
+License in LICENSE. That includes all HTML/CSS/JS under www/, the Capacitor
+Android project, and the build/test scripts under tools/.
+
+You may use, modify, distribute and **sell** the code, as long as you keep the
+copyright notice.
+
+
+2. Artwork — non-commercial only
+--------------------------------
+
+Files covered:
+
+    assets/avatar-v2.jpg
+    assets/avatar-square.png
+    assets/icon-master.png
+    assets/preview-adaptive.png
+    assets/shots/*.png
+    www/icons/*
+    android/app/src/main/res/mipmap-*/*
+    android/app/src/main/res/drawable-nodpi/splash_logo.png
+
+The character design is by **子午老师 (Ziwu)**. Copyright belongs to the author.
+
+The author has publicly granted permission to use this character design in
+personal projects, **on the condition that it is not used commercially**. The
+grant is stated in the author's own public profile, made because of the large
+number of requests for this design.
+
+### You MAY
+
+- use the artwork in this project, and in forks of this project;
+- modify or crop it for personal, non-commercial use;
+- redistribute it as part of a non-commercial project.
+
+### You may NOT
+
+- use it in any commercial product, paid app, or paid service;
+- sell it, bundle it into something sold, or use it in advertising;
+- claim it as your own work;
+- suggest the author endorses your product.
+
+**Commercial use requires separate permission from 子午老师.**
+
+This artwork is NOT covered by the MIT License in LICENSE. The MIT grant does
+not extend to it.
+
+### If you are commercialising a fork
+
+Replace every file listed above with your own artwork before shipping. The code
+will run fine without them — the default avatar and icons are just images in
+`www/icons/`.
+
+
+3. Trademarks
+-------------
+
+"DeepSeek" and the DeepSeek logo are trademarks of DeepSeek, Inc.
+
+DeepFish is an unofficial third-party client. It is not affiliated with,
+endorsed by, or sponsored by DeepSeek, Inc.
+
+
+4. User content
+---------------
+
+Conversations, uploaded images and API keys belong to the user. This project
+stores them on the user's device only and does not collect them.
