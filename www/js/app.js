@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.8.1";
+  var AppVersion = "1.11.1";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -116,6 +116,11 @@
       hit: { off: 0.02, peak: 0.04 },
       miss: { off: 1, peak: 2 },
       out: { off: 4, peak: 8 }
+    },
+    "deepseek-v4-pro": {
+      hit: { off: 0.15, peak: 0.30 },
+      miss: { off: 4.5, peak: 9 },
+      out: { off: 13.5, peak: 27 }
     }
   };
   var DEFAULT_PRICE = PRICING["deepseek-flash"];
@@ -608,8 +613,7 @@
   function modelLabel(s) {
     var chat = (s && s.chat) || {};
     var model = API.modelOf(s);
-    if (model === "deepseek-reasoner") return "深度思考";
-    if (model === "deepseek-chat") return "快速回答";
+    if (model === "deepseek-v4-pro") return "V4 Pro";
     if (chat.thinking && chat.webSearch) return "思考 + 搜索";
     if (chat.thinking) return "深度思考";
     if (chat.webSearch) return "联网搜索";
@@ -706,13 +710,15 @@
     $("setBaseUrl").value = settings.baseUrl || "";
     $("setDefName").value = dp.name || "";
     $("setSystem").value = dp.prompt || "";
-    $("setCtx").value = settings.contextLimit || 20;
-    $("ctxVal").textContent = settings.contextLimit || 20;
+    var budget = parseInt(settings.contextBudget, 10) || 120000;
+    $("setCtx").value = Math.round(budget / 10000);
+    $("ctxVal").textContent = Math.round(budget / 10000);
     $("setTemp").value = settings.temperature;
     $("tempVal").textContent = Number(settings.temperature).toFixed(1);
     $("setMax").value = settings.maxTokens || 0;
     $("maxVal").textContent = settings.maxTokens > 0 ? settings.maxTokens : "不限";
     $("setAutoSnap").checked = !!settings.autoSnapshot;
+    $("setAutoMemory").checked = settings.autoMemory !== false;
     $("appVer").textContent = "v" + AppVersion;
 
     markSeg($("setModel"), settings.model);
@@ -1049,6 +1055,13 @@
           if (cur && cur.id === targetSession.id) speakMessage(targetId);
         }, 350);
       }
+
+      // 后台整理长期记忆（不影响当前回复，失败也无所谓）
+      if (!assistant.error) {
+        setTimeout(function () {
+          try { maybeUpdateMemory(session); } catch (e) { }
+        }, 1500);
+      }
     }
   }
 
@@ -1315,6 +1328,12 @@
     });
     $("personaPrompt").addEventListener("input", function () {
       writePersona("prompt", this.value);
+    });
+    $("personaMemory").addEventListener("input", function () {
+      var s = getSession();
+      if (!s) return;
+      s.memory = this.value;
+      Store.save();
     });
     $("btnResetAvatar").addEventListener("click", resetAvatar);
 
@@ -1615,8 +1634,8 @@
       Store.save();
     });
     $("setCtx").addEventListener("input", function () {
-      settings.contextLimit = parseInt(this.value, 10) || 20;
-      $("ctxVal").textContent = settings.contextLimit;
+      settings.contextBudget = (parseInt(this.value, 10) || 12) * 10000;
+      $("ctxVal").textContent = parseInt(this.value, 10) || 12;
       Store.save();
     });
     $("setTemp").addEventListener("input", function () {
@@ -1632,6 +1651,11 @@
     $("setAutoSnap").addEventListener("change", function () {
       settings.autoSnapshot = this.checked;
       Store.save();
+    });
+    $("setAutoMemory").addEventListener("change", function () {
+      settings.autoMemory = this.checked;
+      Store.save();
+      toast(this.checked ? "已开启自动整理记忆" : "已关闭自动整理记忆", 1600);
     });
 
     $("setModel").addEventListener("click", function (e) {
@@ -1670,7 +1694,7 @@
         btn.textContent = "测试连接";
         btn.disabled = false;
         var names = (r.models || []).join("、");
-        toast("连接成功！可用模型：" + (names || "deepseek-chat"), 3200);
+        toast("连接成功！可用模型：" + (names || "deepseek-flash"), 3200);
       }).catch(function (err) {
         btn.textContent = "测试连接";
         btn.disabled = false;
@@ -1839,9 +1863,12 @@
      ================================================================== */
   function openPersona() {
     var t = personaTarget();
+    var s = getSession();
     $("personaName").value = t.persona.name;
     $("personaPrompt").value = t.persona.prompt;
     $("personaAvatar").src = avatarOf(t.persona);
+    $("personaMemory").value = s ? (s.memory || "") : "";
+    $("personaMemory").disabled = !s;
     $("personaScope").textContent = t.isDefault ? "新对话默认" : "仅当前对话";
     $("personaSheet").setAttribute("aria-hidden", "false");
     $("personaSheet").classList.add("open");
@@ -2049,11 +2076,17 @@
   }
 
   function toggleChatFlag(flag) {
+    var s = getSession();
+    // v4-pro 不提供联网搜索，直接提示而不是静默失效
+    if (flag === "webSearch" && API.modelOf(s) === "deepseek-v4-pro") {
+      toast("v4-pro 不支持联网搜索，要用搜索请切回 flash", 2600);
+      return;
+    }
+
     var f = chatFlags();
     f[flag] = !f[flag];
     Store.save();
     syncComposerState();
-    var s = getSession();
     if (s) { s.updatedAt = Date.now(); renderTopbar(); }
     if (flag === "thinking") toast(f.thinking ? "已开启深度思考" : "已关闭深度思考", 1200);
     else toast(f.webSearch ? "已开启智能搜索" : "已关闭智能搜索", 1200);
@@ -2721,9 +2754,88 @@
     return 0;
   }
 
+  /* GitHub API 未登录时每小时只有 60 次，而且按 IP 算——
+     校园网 / 运营商 NAT / 公司网络下很容易被别人一起打满，返回 403。
+     所以先试官方 API，失败再退到 jsDelivr 读 package.json 的版本号。 */
+  var lastCheckAt = 0;
+
+  function fetchTimeout(url, opts, ms) {
+    var ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, ms);
+    var o = opts || {};
+    if (ctl) o.signal = ctl.signal;
+
+    return fetch(url, o).then(function (res) {
+      clearTimeout(timer);
+      return res;
+    }, function (err) {
+      clearTimeout(timer);
+      throw err;
+    });
+  }
+
+  function checkViaApi() {
+    return fetchTimeout(UPDATE_API + "/releases/latest", {
+      method: "GET",
+      headers: { "Accept": "application/vnd.github+json" }
+    }, 15000).then(function (res) {
+      if (res.status === 404) return { kind: "none" };
+
+      if (res.status === 403 || res.status === 429) {
+        var reset = parseInt(res.headers.get("X-RateLimit-Reset") || "0", 10);
+        var e = new Error("ratelimit");
+        e.waitMin = reset ? Math.max(1, Math.ceil((reset * 1000 - Date.now()) / 60000)) : 0;
+        throw e;
+      }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+
+      return res.json().then(function (rel) {
+        var apk = "";
+        (rel.assets || []).forEach(function (a) {
+          if (!apk && /\.apk$/i.test(a.name || "")) apk = a.browser_download_url;
+        });
+        return {
+          kind: "release",
+          latest: String(rel.tag_name || rel.name || "").replace(/^v/i, ""),
+          pageUrl: rel.html_url || ("https://github.com/" + UPDATE_REPO + "/releases"),
+          apkUrl: apk,
+          notes: String(rel.body || "").replace(/\r/g, "").slice(0, 160)
+        };
+      });
+    });
+  }
+
+  /* 备用源：jsDelivr 读仓库里的 package.json，国内一般比 api.github.com 顺 */
+  function checkViaCdn() {
+    var url = "https://cdn.jsdelivr.net/gh/" + UPDATE_REPO + "@main/package.json";
+    return fetchTimeout(url, { method: "GET", cache: "no-store" }, 15000)
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (j) {
+        var v = String(j.version || "").replace(/^v/i, "");
+        if (!v) throw new Error("没有版本号");
+        return {
+          kind: "package",
+          latest: v,
+          pageUrl: "https://github.com/" + UPDATE_REPO + "/releases/latest",
+          apkUrl: "",
+          notes: ""
+        };
+      });
+  }
+
   function checkUpdate() {
     var btn = $("btnCheckUpdate");
     if (!btn || btn.disabled) return;
+
+    var now = Date.now();
+    if (now - lastCheckAt < 20000) {
+      toast("刚查过了，稍微等一下再试", 2000);
+      return;
+    }
+    lastCheckAt = now;
 
     var original = btn.innerHTML;
     btn.disabled = true;
@@ -2737,50 +2849,39 @@
       btn.innerHTML = original;
     }
 
-    var ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
-    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 12000);
-
-    fetch(UPDATE_API + "/releases/latest", {
-      method: "GET",
-      signal: ctl ? ctl.signal : undefined,
-      headers: { "Accept": "application/vnd.github+json" }
-    }).then(function (res) {
-      clearTimeout(timer);
-      if (res.status === 404) {
-        done();
-        toast("作者还没有发布正式版本，发布后再来检查", 3000);
-        return null;
-      }
-      if (!res.ok) throw new Error("GitHub 返回 " + res.status);
-      return res.json();
-    }).then(function (rel) {
-      if (!rel) return;
+    checkViaApi().catch(function (err) {
+      // 限流或网络失败时，先看备用源能不能给出版本号
+      return checkViaCdn().catch(function () { throw err; });
+    }).then(function (info) {
       done();
+      if (!info) return;
 
-      var latest = String(rel.tag_name || rel.name || "").replace(/^v/i, "");
+      if (info.kind === "none") {
+        toast("作者还没有发布正式版本，发布后再来检查", 3000);
+        return;
+      }
+
+      var latest = info.latest;
       if (!latest) { toast("没有读到版本号"); return; }
-
-      var pageUrl = rel.html_url || ("https://github.com/" + UPDATE_REPO + "/releases");
-      var apkUrl = "";
-      (rel.assets || []).forEach(function (a) {
-        if (!apkUrl && /\.apk$/i.test(a.name || "")) apkUrl = a.browser_download_url;
-      });
 
       if (cmpVer(latest, AppVersion) <= 0) {
         toast("已是最新版本 v" + AppVersion, 2400);
         return;
       }
 
-      var notes = String(rel.body || "").replace(/\r/g, "").slice(0, 160);
+      var fallbackNote = info.kind === "package"
+        ? "\n\n（这次没连上 GitHub 接口，只读到了版本号；下载请去 Releases 页面）"
+        : "";
+
       openModal({
         title: "发现新版本 v" + latest,
-        message: "当前版本 v" + AppVersion + "\n\n" + (notes ? notes + "\n\n" : "") +
-          "点「去下载」后会把链接复制到剪贴板，在浏览器打开即可。",
+        message: "当前版本 v" + AppVersion + "\n\n" + (info.notes ? info.notes + "\n\n" : "") +
+          "点「去下载」后会把链接复制到剪贴板，在浏览器打开即可。" + fallbackNote,
         okText: "去下载",
         cancelText: "稍后"
       }).then(function (ok) {
         if (!ok) return;
-        var url = apkUrl || pageUrl;
+        var url = info.apkUrl || info.pageUrl;
         if (isNative()) {
           copyText(url).then(function () {
             toast("下载链接已复制，去浏览器打开", 3200);
@@ -2792,12 +2893,99 @@
         }
       });
     }).catch(function (err) {
-      clearTimeout(timer);
       done();
-      var msg = (err && err.name === "AbortError")
-        ? "请求超时，请检查网络"
-        : ((err && err.message) || "网络错误");
-      toast("检查更新失败：" + msg, 3400);
+      var msg;
+      if (err && err.name === "AbortError") {
+        msg = "请求超时，换个网络再试试";
+      } else if (err && err.message === "ratelimit") {
+        msg = "GitHub 接口被限流了（每小时有次数上限）" +
+          (err.waitMin ? "，约 " + err.waitMin + " 分钟后恢复" : "");
+      } else {
+        msg = (err && err.message) || "网络不通";
+      }
+      toast("检查更新失败：" + msg, 3800);
+    });
+  }
+
+  /* ==================================================================
+     长期记忆：把超出上下文窗口的旧对话压缩成摘要
+     否则聊过 30 条之后，前面发生的事就彻底丢了，角色只能靠一句设定硬撑。
+     ================================================================== */
+  var summarizing = {};
+
+  function maybeUpdateMemory(session) {
+    if (!settings.autoMemory) return;
+    if (!settings.apiKey) return;
+    if (!session || summarizing[session.id]) return;
+
+    var msgs = session.messages.filter(function (m) {
+      return (m.role === "user" || m.role === "assistant") && m.content && !m.error;
+    });
+
+    var covered = session.memoryCovered || 0;
+
+    // 按实际字数判断是否接近预算——没超之前一律发原文，效果最好
+    var budgetChars = parseInt(settings.contextBudget, 10) || 120000;
+    var totalChars = 0;
+    for (var i = covered; i < msgs.length; i++) {
+      totalChars += String(msgs[i].content || "").length;
+    }
+    if (totalChars <= budgetChars * 0.85) return;
+
+    // 超了就砍掉最前面一段，留出 60% 预算的空间，避免频繁触发
+    var target = budgetChars * 0.6;
+    var sum = 0;
+    var cut = msgs.length;
+    for (var j = msgs.length - 1; j >= covered; j--) {
+      var len = String(msgs[j].content || "").length;
+      if (sum + len > target) break;
+      sum += len;
+      cut = j;
+    }
+    if (cut <= covered || cut - covered < 6) return;
+
+    var chunk = msgs.slice(covered, cut);
+    summarizing[session.id] = true;
+
+    var body = chunk.map(function (m) {
+      var who = m.role === "user" ? "用户" : "角色";
+      return who + "：" + String(m.content).slice(0, 600);
+    }).join("\n");
+
+    var prompt = [
+      {
+        role: "system",
+        content: "你在帮一段角色扮演对话整理长期记忆。只输出记忆内容本身，不要解释、不要寒暄、不要加标题。"
+      },
+      {
+        role: "user",
+        content:
+          "【已有记忆】\n" + (session.memory || "（暂无）") +
+          "\n\n【新发生的对话】\n" + body +
+          "\n\n请合并成一份新的记忆，300 字以内。必须保留：\n" +
+          "1. 用户的称呼、性格、喜好\n" +
+          "2. 已经发生的关键事件、约定\n" +
+          "3. 角色对用户的态度与关系变化\n" +
+          "旧记忆里过时的内容直接改写，不要简单追加。"
+      }
+    ];
+
+    API.complete(settings, prompt, 700).then(function (text) {
+      var clean = String(text || "").trim();
+      if (!clean) return;
+      session.memory = clean.slice(0, 1500);
+      session.memoryCovered = cut;
+      Store.save();
+
+      // 如果正在看这个对话的角色面板，同步显示
+      var cur = getSession();
+      if (cur && cur.id === session.id && $("personaSheet").classList.contains("open")) {
+        $("personaMemory").value = session.memory;
+      }
+    }).catch(function () {
+      // 记忆整理失败不影响聊天
+    }).then(function () {
+      summarizing[session.id] = false;
     });
   }
 

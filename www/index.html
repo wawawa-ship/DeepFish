@@ -198,6 +198,16 @@
     </div>
 
     <div class="group">
+      <div class="group-title">长期记忆</div>
+      <textarea id="personaMemory" rows="5"
+        placeholder="自动整理的内容会出现在这里，也可以自己补充：&#10;· 用户的名字和称呼方式&#10;· 已经发生的关键事件&#10;· 你们约定过的设定"></textarea>
+      <span class="field-tip">
+        这段会随每条消息一起发给模型。对话变长后，早期内容会被压缩进这里，
+        角色就不会因为"忘了前面发生过什么"而崩。
+      </span>
+    </div>
+
+    <div class="group">
       <div class="group-title">聊天背景</div>
       <div class="bg-preview" id="bgPreview"></div>
       <div class="btn-grid two">
@@ -315,10 +325,12 @@
         <span class="field-label">默认模型</span>
         <div class="seg" id="setModel">
           <button type="button" data-v="deepseek-flash">flash</button>
-          <button type="button" data-v="deepseek-chat">chat</button>
-          <button type="button" data-v="deepseek-reasoner">reasoner</button>
+          <button type="button" data-v="deepseek-v4-pro">v4-pro</button>
         </div>
-        <span class="field-tip">flash 支持思考、联网搜索与图片；chat/reasoner 为旧模型。</span>
+        <span class="field-tip">
+          <b>flash</b>：快、便宜，支持联网搜索和图片。日常问答用它。<br>
+          <b>v4-pro</b>：角色扮演、长文写作明显更稳，但贵约 4 倍，且不支持联网搜索和图片。
+        </span>
       </label>
       <button class="wide-btn" id="btnTestConn" type="button">测试连接</button>
     </div>
@@ -351,9 +363,18 @@
     <div class="group">
       <div class="group-title">对话行为</div>
       <label class="field">
-        <span class="field-label">携带历史消息 <b id="ctxVal">30</b> 条</span>
-        <input id="setCtx" type="range" min="2" max="80" step="2" value="30">
-        <span class="field-tip">调得太小，模型会"忘记"之前的互动、越聊越不像角色；调大更稳，但更费 token。建议 30–50。</span>
+        <span class="field-label">上下文预算 约 <b id="ctxVal">12</b> 万字</span>
+        <input id="setCtx" type="range" min="2" max="40" step="1" value="12">
+        <span class="field-tip">
+          按<b>实际字数</b>算，不再数条数。没超出预算就会把<b>整段对话</b>都发给模型，
+          超了才自动压缩早期内容。<br>
+          官方上下文上限是 100 万 token（约 70 万字），40 万字以内都很安全。
+        </span>
+      </label>
+
+      <label class="switch-row">
+        <span>自动整理长期记忆<em>每约 10 条压缩一次，每次少量 token</em></span>
+        <input id="setAutoMemory" type="checkbox" checked>
       </label>
       <label class="field">
         <span class="field-label">随机性 temperature <b id="tempVal">1.0</b></span>

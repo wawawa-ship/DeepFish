@@ -165,10 +165,13 @@
       defaultChat: { thinking: false, webSearch: false },
       ttsVoice: "tide",
       autoRead: false,
+      autoMemory: true,
       agreedNotice: false,
       temperature: 1.0,
       maxTokens: 0,
-      contextLimit: 30,
+      contextLimit: 100,
+      // 上下文预算（单位：字）。按 token 估算动态决定发多少，而不是数条数。
+      contextBudget: 120000,
       theme: "auto",
       fontSize: "normal",
       autoSnapshot: true,
@@ -267,6 +270,10 @@
         model: typeof cs.model === "string" ? cs.model : ""
       },
       background: typeof s.background === "string" ? s.background : "",
+      // 长期记忆：自动整理的对话摘要 + 用户补充，超出窗口后靠它保住人设
+      memory: typeof s.memory === "string" ? s.memory : "",
+      // 已经压缩到第几条消息（下次从这里接着往后续写记忆）
+      memoryCovered: typeof s.memoryCovered === "number" ? s.memoryCovered : 0,
       messages: msgs.map(function (m) {
         return {
           id: m.id || uid("m"),

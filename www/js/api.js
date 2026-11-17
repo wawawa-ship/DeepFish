@@ -68,7 +68,9 @@
   /* 当前对话使用的模型 */
   function modelOf(session) {
     var s = (session && session.chat) || {};
-    if (s.model) return s.model;
+    var m = s.model || "";
+    // 已知模型直接返回；旧的 chat / reasoner 已并入 flash，回退过去
+    if (m === "deepseek-flash" || m === "deepseek-v4-pro") return m;
     return "deepseek-flash";
   }
 
@@ -118,17 +120,29 @@
   function buildSystemPrompt(session) {
     var persona = (session && session.persona) || {};
     var base = String(persona.prompt || "").trim();
-    if (!base) return "";
+    var memory = String((session && session.memory) || "").trim();
+    if (!base && !memory) return "";
 
     var name = String(persona.name || "").trim() || "助手";
     var chat = (session && session.chat) || {};
     var useTools = !!chat.webSearch && modelOf(session) === "deepseek-flash";
 
     var parts = [];
-    parts.push("你正在扮演的角色是「" + name + "」。");
-    parts.push("");
-    parts.push("【角色设定】");
-    parts.push(base);
+
+    if (base) {
+      parts.push("你正在扮演的角色是「" + name + "」。");
+      parts.push("");
+      parts.push("【角色设定】");
+      parts.push(base);
+    }
+
+    if (memory) {
+      parts.push("");
+      parts.push("【长期记忆】");
+      parts.push("以下是之前对话里发生过的事，请据此保持连贯，不要与它矛盾：");
+      parts.push(memory);
+    }
+
     parts.push("");
     parts.push("【保持一致的规则】");
     parts.push("1. 始终以「" + name + "」的身份、第一人称和语气说话，不要因为对话变长就改变性格。");
@@ -140,10 +154,63 @@
     return parts.join("\n");
   }
 
+  /* 粗略估算 token：中文约 1.6 token/字，英文/代码约 0.35 */
+  function estimateTokens(text) {
+    var s = String(text || "");
+    if (!s) return 0;
+    var cjk = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 0x4e00 && c <= 0x9fff) cjk++;
+    }
+    return Math.ceil(cjk * 1.6 + (s.length - cjk) * 0.35);
+  }
+
+  function msgTokens(m) {
+    var t = estimateTokens(m.content) + 6;
+    if (m.images && m.images.length) t += m.images.length * 400;
+    return t;
+  }
+
+  /* 按 token 预算挑上下文。
+     关键：起点「尽量不动」——只要还在预算内就一直用同一个起点，
+     这样每轮请求只是往后追加，前缀缓存能稳定命中。
+     真超预算时才重新开一个起点，并且一次砍到 60%，
+     避免每轮都滑一格、把缓存全部废掉。 */
+  function pickContext(session, all, budgetChars) {
+    var chars = parseInt(budgetChars, 10);
+    if (!(chars > 0)) chars = 120000;
+    var budgetTokens = Math.floor(chars * 1.5);
+
+    var start = session ? session.ctxStart : 0;
+    if (typeof start !== "number" || start < 0 || start >= all.length) start = 0;
+
+    var total = 0;
+    var i;
+    for (i = start; i < all.length; i++) total += msgTokens(all[i]);
+
+    if (total <= budgetTokens) {
+      return { list: all.slice(start), start: start };
+    }
+
+    // 超了：从尾部往回填到 60% 预算，作为新的稳定起点
+    var target = Math.floor(budgetTokens * 0.6);
+    var sum = 0;
+    var ns = all.length;
+    for (i = all.length - 1; i >= 0; i--) {
+      var t = msgTokens(all[i]);
+      if (sum + t > target) break;
+      sum += t;
+      ns = i;
+    }
+    while (ns < all.length && all[ns].role !== "user") ns++;
+
+    return { list: all.slice(ns), start: ns };
+  }
+
   /* 组装发送给 API 的消息（含角色设定与上下文裁剪） */
   function buildMessages(session, settings) {
     var out = [];
-    var persona = session.persona || {};
     var sys = buildSystemPrompt(session);
     if (sys) out.push({ role: "system", content: sys });
 
@@ -154,11 +221,9 @@
       return (m.role === "user" || m.role === "assistant") && (m.content || (m.images && m.images.length)) && !m.error;
     });
 
-    var limit = parseInt(settings.contextLimit, 10);
-    if (!(limit > 0)) limit = 30;
-    var slice = usable.slice(-limit);
-
-    while (slice.length && slice[0].role !== "user") slice.shift();
+    var picked = pickContext(session, usable, settings.contextBudget);
+    if (session) session.ctxStart = picked.start;
+    var slice = picked.list;
 
     for (var i = 0; i < slice.length; i++) {
       out.push(messagePayload(slice[i], useTools));
@@ -170,6 +235,7 @@
     var chat = (session && session.chat) || {};
     var model = modelOf(session);
     var isFlash = model === "deepseek-flash";
+    var isPro = model === "deepseek-v4-pro";
 
     var body = {
       model: model,
@@ -177,19 +243,19 @@
       stream: !!stream
     };
 
-    // 思考开关（只有 flash 支持显式开关）
-    if (isFlash) {
+    // 思考开关（flash 与 v4-pro 都支持显式开关）
+    if (isFlash || isPro) {
       body.thinking = { type: chat.thinking ? "enabled" : "disabled" };
       if (chat.thinking) body.reasoning_effort = "high";
     }
 
-    // 联网搜索工具
+    // 联网搜索工具：只有 flash 提供
     if (isFlash && chat.webSearch) {
       body.tools = [{ type: "deepseek_web_search" }];
     }
 
     // 采样参数：思考模式与联网模式下会被服务端忽略
-    if (model !== "deepseek-reasoner" && !chat.thinking) {
+    if (!chat.thinking) {
       var t = parseFloat(settings.temperature);
       if (!isNaN(t)) body.temperature = Math.min(2, Math.max(0, t));
     }
@@ -358,6 +424,30 @@
     });
   }
 
+  /* ---------------- 一次性补全（非流式）：后台整理记忆用 ---------------- */
+  function complete(settings, messages, maxTokens) {
+    var url = endpoint(settings.baseUrl, "/chat/completions");
+    return fetch(url, {
+      method: "POST",
+      headers: headers(settings),
+      body: JSON.stringify({
+        model: "deepseek-flash",
+        messages: messages,
+        stream: false,
+        thinking: { type: "disabled" },
+        max_tokens: maxTokens || 800
+      })
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (t) { throw makeApiError(res.status, t); });
+      }
+      return res.json();
+    }).then(function (j) {
+      var msg = j.choices && j.choices[0] && j.choices[0].message;
+      return (msg && msg.content) || "";
+    });
+  }
+
   /* ---------------- 朗读（TTS） ---------------- */
   function ttsEndpoint(base) {
     return normalizeBase(base) + "/v1/tools/tts";
@@ -413,6 +503,7 @@
 
   global.API = {
     chat: chat,
+    complete: complete,
     tts: tts,
     testConnection: testConnection,
     buildMessages: buildMessages,
