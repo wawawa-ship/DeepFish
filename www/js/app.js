@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.15.0";
+  var AppVersion = "1.16.4";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -413,13 +413,14 @@
   function usageCardHtml(msg) {
     var c = msg.cost;
     if (!c) return "";
-    var total = c.hit + c.miss;
+    var total = (c.hit || 0) + (c.miss || 0);
+    var rate = total > 0 ? Math.round((c.hit || 0) / total * 100) : 0;
 
     var html = '<div class="usage-card" data-for="' + msg.id + '" hidden>';
     html += '<div class="usage-row"><span>输入</span><b>' + fmtNum(total) + " tokens</b></div>";
-    if (c.hit) {
-      html += '<div class="usage-row dim"><span>其中缓存命中</span><b>' + fmtNum(c.hit) + "</b></div>";
-    }
+    // 缓存命中始终显示（为 0 时也显示 0%），避免看起来像功能坏了
+    html += '<div class="usage-row dim"><span>其中缓存命中</span><b>' +
+      fmtNum(c.hit || 0) + "（" + rate + "%）</b></div>";
     html += '<div class="usage-row"><span>输出</span><b>' + fmtNum(c.out) + " tokens</b></div>";
     if (c.searches) {
       html += '<div class="usage-row"><span>联网搜索</span><b>' + c.searches + " 次</b></div>";
@@ -483,7 +484,18 @@
   }
 
   function userNode(turn) {
+    // 兜底：万一有结构不完整的回合（老数据 / 导入异常），不要整页崩掉
+    if (!turn || !Array.isArray(turn.edits) || !turn.edits.length) {
+      var empty = document.createElement("div");
+      empty.className = "msg user";
+      if (turn) empty.setAttribute("data-turn", turn.id);
+      empty.innerHTML = '<div class="bubble"></div>';
+      return empty;
+    }
+
     var edit = turn.edits[turn.activeEdit] || turn.edits[0];
+    if (!edit) edit = { text: "", images: [], files: [] };
+
     var node = document.createElement("div");
     node.className = "msg user";
     node.setAttribute("data-turn", turn.id);
@@ -2751,6 +2763,118 @@
     return msgs;
   }
 
+  /* 把 ZIP 解析出来的「回合 + 变体」转成 DeepFish 的消息结构 */
+  function zipTurnsToMessages(turns, baseTs) {
+    return (turns || []).map(function (t, ti) {
+      var ts = baseTs + ti * 1000;
+
+      return {
+        id: t.id,
+        role: "user",
+        createdAt: ts,
+        activeEdit: 0,
+        branch: t.branch ? {
+          turnId: t.branch.turnId,
+          editIndex: t.branch.editIndex || 0,
+          replyIndex: t.branch.replyIndex || 0
+        } : null,
+        edits: (t.edits || []).map(function (e, ei) {
+          var text = e.text || "";
+          if (!text && e.names && e.names.length) {
+            text = "[" + e.names.join("、") + "]";
+          }
+
+          var reps = (e.replies || []).map(function (r, ri) {
+            return {
+              id: t.id + "_e" + ei + "_r" + ri,
+              content: r.content || "",
+              reasoning: r.reasoning || "",
+              createdAt: ts + ri
+            };
+          });
+          if (!reps.length) {
+            reps = [{ id: t.id + "_e" + ei + "_r0", content: "", reasoning: "", createdAt: ts }];
+          }
+
+          return {
+            id: t.id + "_e" + ei,
+            text: text,
+            createdAt: ts,
+            images: [],
+            files: [],
+            replies: reps,
+            activeReply: 0
+          };
+        })
+      };
+    });
+  }
+
+  /* 把扁平的 {role, content} 列表转成「回合 + 回复」结构，并串好分支链 */
+  function buildTurnsFromFlat(msgs, baseTs) {
+    var turns = [];
+    var cur = null;
+
+    (msgs || []).forEach(function (m, i) {
+      var ts = baseTs + i * 1000;
+
+      if (m.role === "assistant") {
+        if (!cur) return;   // 没有对应用户消息的回复，跳过
+        var ed = cur.edits[0];
+        var rep = {
+          id: Store.uid("r"),
+          content: m.content || "",
+          reasoning: m.reasoning || "",
+          createdAt: ts
+        };
+        if (ed.replies.length === 1 && !ed.replies[0].content) {
+          ed.replies[0] = rep;
+        } else {
+          ed.replies.push(rep);
+        }
+        ed.activeReply = ed.replies.length - 1;
+        return;
+      }
+
+      // 只发了图片 / 文件的提问，用文件名占位，不然气泡是空的
+      var textVal = m.content || "";
+      if (!textVal && Array.isArray(m.fileNames) && m.fileNames.length) {
+        textVal = "[" + m.fileNames.join("、") + "]";
+      }
+
+      cur = {
+        id: Store.uid("u"),
+        role: "user",
+        createdAt: ts,
+        activeEdit: 0,
+        branch: null,
+        edits: [{
+          id: Store.uid("e"),
+          text: textVal,
+          createdAt: ts,
+          images: Array.isArray(m.images) ? m.images : [],
+          files: Array.isArray(m.files) ? m.files : [],
+          replies: [{ id: Store.uid("r"), content: "", reasoning: "", createdAt: ts }],
+          activeReply: 0
+        }]
+      };
+      turns.push(cur);
+    });
+
+    // 串成分支链，这样以后改历史消息时后续能正确隐藏
+    for (var b = 1; b < turns.length; b++) {
+      var prevTurn = turns[b - 1];
+      var prevEdit = prevTurn.edits[prevTurn.activeEdit || 0];
+      turns[b].branch = {
+        turnId: prevTurn.id,
+        editIndex: prevTurn.activeEdit || 0,
+        replyIndex: prevEdit ? (prevEdit.activeReply || 0) : 0
+      };
+    }
+
+    return turns;
+  }
+
   function importAsSession(msgs, titlePrefix) {
     if (!msgs || !msgs.length) { toast("没解析出对话内容"); return; }
 
@@ -2761,15 +2885,7 @@
     s.persona.avatar = d.avatar || "";
 
     var now = Date.now();
-    msgs.forEach(function (m, i) {
-      s.messages.push({
-        id: Store.uid("m"),
-        role: m.role,
-        content: m.content,
-        reasoning: "",
-        createdAt: now + i * 1000
-      });
-    });
+    s.messages = buildTurnsFromFlat(msgs, now);
 
     var firstUser = msgs.filter(function (m) { return m.role === "user"; })[0];
     s.title = (titlePrefix || "导入 · ") + trimTitle(firstUser ? firstUser.content : "对话");
@@ -2819,7 +2935,7 @@
     }
 
     var totalMsg = 0;
-    r.conversations.forEach(function (c) { totalMsg += c.messages.length; });
+    r.conversations.forEach(function (c) { totalMsg += (c.count || 0); });
 
     var selCount = zipSelectedCount();
     var allOn = selCount === r.conversations.length;
@@ -2841,7 +2957,7 @@
       html += '<div class="zip-item' + (on ? " on" : "") + '" data-zid="' + esc(c.id) + '">' +
         '<span class="zip-check">✓</span>' +
         '<span class="zip-title">' + esc(c.title) + "</span>" +
-        '<span class="zip-meta">' + c.messages.length + " 条 · " + esc(fmtDay(c.updatedAt)) + "</span>" +
+        '<span class="zip-meta">' + (c.count || 0) + " 条 · " + esc(fmtDay(c.updatedAt)) + "</span>" +
         "</div>";
     });
 
@@ -2954,6 +3070,7 @@
     var baseName = String(d.name || DEFAULT_NAME).trim() || DEFAULT_NAME;
     var now = Date.now();
     var created = 0;
+    var firstNewId = null;
 
     picked.forEach(function (c) {
       var ts = c.updatedAt || now;
@@ -2966,22 +3083,16 @@
         persona: { name: baseName, prompt: d.prompt || "", avatar: d.avatar || "" },
         chat: { thinking: false, webSearch: false, model: "" },
         background: "",
-        messages: c.messages.map(function (m, i) {
-          return {
-            id: Store.uid("m"),
-            role: m.role === "assistant" ? "assistant" : "user",
-            content: m.content || "",
-            reasoning: m.reasoning || "",
-            createdAt: ts + i * 1000
-          };
-        })
+        messages: zipTurnsToMessages(c.turns, ts)
       };
       state.sessions.push(s);
+      if (!firstNewId) firstNewId = s.id;
       created++;
     });
 
     state.sessions.sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
-    state.activeId = state.sessions.length ? state.sessions[0].id : null;
+    // 导入完直接停在刚导入的那个对话上，而不是按时间排序的第一条
+    state.activeId = firstNewId || (state.sessions.length ? state.sessions[0].id : null);
 
     zipResult = null;
     importMode = "msgs";

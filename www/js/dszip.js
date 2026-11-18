@@ -149,69 +149,163 @@
     return chain.reverse();
   }
 
-  /* 把一次导出的会话文件转成 DeepFish 的消息数组 */
-  function convertSession(file) {
-    var chain = pickBranch(file);
-    var msgs = [];
-
-    for (var i = 0; i < chain.length; i++) {
-      var m = chain[i];
-      if (!m || m.role !== "USER") continue;
-
-      var next = chain[i + 1];
-      var reply = (next && next.role === "ASSISTANT") ? next : null;
-      if (reply) i++;
-
-      // 被内容过滤撤回的问答整轮跳过
-      if (reply && reply.status === "CONTENT_FILTER") continue;
-
-      var text = "";
-      var fileCards = [];
-      (m.fragments || []).forEach(function (f) {
-        if (!f || !f.type) return;
-        if (f.type === "REQUEST") {
-          text += (text ? "\n" : "") + String(f.content || "");
-        } else if (f.type === "FILE") {
-          (f.files || []).forEach(function (x) {
-            if (!x) return;
-            fileCards.push({
-              name: x.file_name || "文件",
-              size: x.file_size || 0,
-              isImage: !!x.is_image
-            });
-          });
-        }
-      });
-
-      if (!text && !fileCards.length) continue;
-
-      msgs.push({
-        role: "user",
-        content: text,
-        fileNames: fileCards.map(function (c) { return c.name; })
-      });
-
-      if (reply) {
-        var content = "";
-        var reasoning = "";
-        (reply.fragments || []).forEach(function (f) {
-          if (!f || !f.type) return;
-          if (f.type === "THINK") {
-            if (f.content) reasoning += String(f.content) + "\n\n";
-          } else if (f.type === "RESPONSE") {
-            if (f.content) content += String(f.content);
-          }
+  /* ---------- 片段抽取 ---------- */
+  function userTextOf(m) {
+    var text = "";
+    var names = [];
+    (m.fragments || []).forEach(function (f) {
+      if (!f || !f.type) return;
+      if (f.type === "REQUEST") {
+        text += (text ? "\n" : "") + String(f.content || "");
+      } else if (f.type === "FILE") {
+        (f.files || []).forEach(function (x) {
+          if (!x) return;
+          names.push(x.file_name || "文件");
         });
-        if (content || reasoning) {
-          msgs.push({
-            role: "assistant",
-            content: content,
-            reasoning: reasoning.trim()
-          });
+      }
+    });
+    return { text: text, names: names };
+  }
+
+  function replyOf(m) {
+    var content = "";
+    var reasoning = "";
+    (m.fragments || []).forEach(function (f) {
+      if (!f || !f.type) return;
+      if (f.type === "THINK") {
+        if (f.content) reasoning += String(f.content) + "\n\n";
+      } else if (f.type === "RESPONSE" || f.type === "TEMPLATE_RESPONSE") {
+        if (f.content) content += String(f.content);
+      }
+    });
+    return { content: content, reasoning: reasoning.trim() };
+  }
+
+  /* 把一次导出的会话文件转成 DeepFish 的「回合 + 变体」结构。
+     不再是只取当前分支，而是把整棵树展开：
+       · 同一位置有多个用户输入 → 变成该回合的多个 edits
+       · 同一个输入有多条模型回复 → 变成该输入的多个 replies
+       · 每个回复下面的后续对话 → 通过 branch 挂到对应的 (回合, 输入, 回复) 上 */
+  function convertSession(file) {
+    var list = Array.isArray(file.messages) ? file.messages : [];
+    var byId = {};
+    var children = {};
+    var roots = [];
+    var flat = [];   // 仅用于「共多少条」的预览展示
+
+    list.forEach(function (m) {
+      if (!m || typeof m.id !== "number") return;
+      byId[m.id] = m;
+    });
+
+    list.forEach(function (m) {
+      if (!m || typeof m.id !== "number") return;
+      var pid = m.parent_id;
+      if (pid === null || pid === undefined || !byId[pid]) roots.push(m);
+      else (children[pid] = children[pid] || []).push(m);
+    });
+
+    if (!roots.length) return { turns: [], count: 0 };
+
+    // 当前路径上的节点排在前面，导入后默认看到的就是官方 App 里那一条
+    var onPath = {};
+    var walk = byId[file.current_message_id];
+    var guard = 0;
+    while (walk && guard++ < 10000) {
+      onPath[walk.id] = true;
+      walk = (walk.parent_id === null || walk.parent_id === undefined) ? null : byId[walk.parent_id];
+    }
+
+    function pathFirst(arr) {
+      return arr.slice().sort(function (a, b) {
+        var pa = onPath[a.id] ? 0 : 1;
+        var pb = onPath[b.id] ? 0 : 1;
+        if (pa !== pb) return pa - pb;
+        return (a.id || 0) - (b.id || 0);
+      });
+    }
+
+    var turns = [];
+
+    /* 用显式栈做深度优先遍历，不用递归——
+       超长对话可能有上千层，递归会爆栈，整段就导不进来了。 */
+    var stack = [];
+
+    var rootUsers = pathFirst(roots.filter(function (m) { return m && m.role === "USER"; }));
+    if (rootUsers.length) stack.push({ users: rootUsers, parent: null });
+
+    while (stack.length) {
+      var frame = stack.pop();
+      var userNodes = frame.users;
+      var parentRef = frame.parent;
+      if (!userNodes || !userNodes.length) continue;
+
+      var edits = userNodes.map(function (un) {
+        var u = userTextOf(un);
+        var ais = pathFirst((children[un.id] || []).filter(function (x) {
+          return x && x.role === "ASSISTANT";
+        }));
+
+        var replies = ais.map(function (an) {
+          var r = replyOf(an);
+          return { node: an, content: r.content, reasoning: r.reasoning };
+        });
+
+        return { node: un, text: u.text, names: u.names, replies: replies };
+      });
+
+      // 用户文字和回复全空的回合没意义
+      edits = edits.filter(function (e) {
+        if (e.text || e.names.length) return true;
+        return e.replies.some(function (r) { return r.content || r.reasoning; });
+      });
+      if (!edits.length) continue;
+
+      var turnId = "t_" + edits[0].node.id;
+      turns.push({
+        id: turnId,
+        branch: parentRef ? {
+          turnId: parentRef.turnId,
+          editIndex: parentRef.editIndex,
+          replyIndex: parentRef.replyIndex
+        } : null,
+        edits: edits
+      });
+
+      // 逆序压栈，保证出栈顺序和原来的递归一致（先第一个分支）
+      for (var ei = edits.length - 1; ei >= 0; ei--) {
+        var reps = edits[ei].replies;
+        for (var ri = reps.length - 1; ri >= 0; ri--) {
+          var kids = pathFirst((children[reps[ri].node.id] || []).filter(function (x) {
+            return x && x.role === "USER";
+          }));
+          if (kids.length) {
+            stack.push({
+              users: kids,
+              parent: { turnId: turnId, editIndex: ei, replyIndex: ri }
+            });
+          }
         }
       }
     }
-    return msgs;
+
+    // 内容过滤撤回的整轮丢掉
+    turns = turns.filter(function (t) {
+      if (!t.edits.length) return false;
+      return t.edits.some(function (e) {
+        if (e.text || e.names.length) return true;
+        return e.replies.some(function (r) { return r.content || r.reasoning; });
+      });
+    });
+
+    var count = 0;
+    turns.forEach(function (t) {
+      t.edits.forEach(function (e) {
+        count += 1 + Math.max(1, e.replies.length);
+      });
+    });
+
+    return { turns: turns, count: count };
   }
 
   /* 解析整个导出包，返回对话列表（按更新时间倒序）
@@ -256,13 +350,14 @@
             if (!row || !row.id) { skipped++; return; }
             return readJson("chat_sessions/" + row.id + ".json").then(function (f) {
               if (!f) { skipped++; return; }
-              var msgs = convertSession(f);
-              if (!msgs.length) { skipped++; return; }
+              var built = convertSession(f);
+              if (!built || !built.turns.length) { skipped++; return; }
               conversations.push({
                 id: f.id || row.id,
                 title: String(f.title || "").trim() || "未命名对话",
                 updatedAt: Date.parse(row.updated_at || f.inserted_at || 0) || Date.now(),
-                messages: msgs
+                turns: built.turns,
+                count: built.count
               });
             }).catch(function () { skipped++; });
           });

@@ -344,30 +344,67 @@
     var byId = {};
     for (var i = 0; i < all.length; i++) byId[all[i].id] = all[i];
 
-    function chainOk(turn) {
+    /* 按数组顺序逐个判定：branch 总是指向更早的回合，
+       所以父节点的结果一定已经算好了，直接复用即可。
+       这样没有递归、也没有深度上限——几千轮的对话照样正确。 */
+    var okMap = {};
+
+    function parentOk(turn) {
       var b = turn.branch;
-      var guard = 0;
-      while (b) {
-        if (++guard > 500) return false;
-        var parent = byId[b.turnId];
-        if (!parent) return false;
-        if ((parent.activeEdit || 0) !== (b.editIndex || 0)) return false;
+      if (!b) return true;
 
-        // 回复版本也要校验：重新生成后，旧回复下面的对话应该自动隐藏
-        if (b.replyIndex !== null && b.replyIndex !== undefined) {
-          var pe = parent.edits[parent.activeEdit || 0];
-          if (pe && (pe.activeReply || 0) !== b.replyIndex) return false;
-        }
+      var parent = byId[b.turnId];
+      if (!parent) return false;
 
-        b = parent.branch;
+      if ((parent.activeEdit || 0) !== (b.editIndex || 0)) return false;
+
+      if (b.replyIndex !== null && b.replyIndex !== undefined) {
+        var pe = parent.edits[parent.activeEdit || 0];
+        if (pe && (pe.activeReply || 0) !== b.replyIndex) return false;
       }
-      return true;
+
+      return okMap[parent.id] === true;
     }
 
     var out = [];
     for (var j = 0; j < all.length; j++) {
-      if (chainOk(all[j])) out.push(all[j]);
+      var t = all[j];
+      if (!t) continue;
+
+      var ok;
+      if (!t.branch) {
+        ok = true;
+      } else if (okMap[t.branch.turnId] === undefined && byId[t.branch.turnId]) {
+        // 极端情况：父节点排在后面（数据乱序），退回逐级向上检查
+        ok = (function () {
+          var node = t;
+          var seen = {};
+          var guard = 0;
+          while (node && node.branch) {
+            if (++guard > 200000) return false;
+            if (seen[node.id]) return false;
+            seen[node.id] = 1;
+
+            var p = byId[node.branch.turnId];
+            if (!p) return false;
+            if ((p.activeEdit || 0) !== (node.branch.editIndex || 0)) return false;
+
+            var pe2 = p.edits[p.activeEdit || 0];
+            if (node.branch.replyIndex !== null && node.branch.replyIndex !== undefined) {
+              if (pe2 && (pe2.activeReply || 0) !== node.branch.replyIndex) return false;
+            }
+            node = p;
+          }
+          return true;
+        })();
+      } else {
+        ok = parentOk(t);
+      }
+
+      okMap[t.id] = ok;
+      if (ok) out.push(t);
     }
+
     return out;
   }
 
