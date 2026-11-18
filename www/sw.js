@@ -1,5 +1,5 @@
 /* Service Worker：离线可打开，接口请求永不缓存 */
-var CACHE = "deepfish-v1.14.2";
+var CACHE = "deepfish-v1.15.0";
 var ASSETS = [
   "./",
   "./index.html",

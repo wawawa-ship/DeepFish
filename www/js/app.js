@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.14.2";
+  var AppVersion = "1.15.0";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -999,7 +999,7 @@
     renderDrawer();
     Store.save();
     setStreaming(false);
-    startGeneration(s);
+    startGeneration(s, turn.id);
     snapToBottom();
   }
 
@@ -1070,7 +1070,11 @@
       id: Store.uid("u"),
       role: "user",
       createdAt: Date.now(),
-      branch: lastVis ? { turnId: lastVis.id, editIndex: lastVis.activeEdit } : null,
+      branch: lastVis ? {
+        turnId: lastVis.id,
+        editIndex: lastVis.activeEdit,
+        replyIndex: (lastVis.edits[lastVis.activeEdit] || {}).activeReply || 0
+      } : null,
       edits: [{
         id: Store.uid("e"),
         text: text,
@@ -1089,9 +1093,18 @@
     startGeneration(session);
   }
 
-  function startGeneration(session) {
+  function startGeneration(session, targetTurnId) {
     var vis = Store.visibleTurns(session);
-    var turn = vis.length ? vis[vis.length - 1] : null;
+    var turn = null;
+
+    // 指定了目标就生成那一条（比如对历史回复点重新生成），否则生成最后一条
+    if (targetTurnId) {
+      for (var ti = 0; ti < vis.length; ti++) {
+        if (vis[ti].id === targetTurnId) { turn = vis[ti]; break; }
+      }
+    }
+    if (!turn) turn = vis.length ? vis[vis.length - 1] : null;
+
     if (!turn || !turn.edits || !turn.edits.length) { setStreaming(false); return; }
 
     var edit = turn.edits[turn.activeEdit] || turn.edits[0];
@@ -1487,10 +1500,11 @@
       });
       edit.activeReply = edit.replies.length - 1;
 
-      refreshTurn(turn);
+      // 换了回复版本，后面挂在旧回复上的对话会自动隐藏，所以整页重排
+      refreshAfterSwitch(turn);
       Store.save();
       setStreaming(false);
-      startGeneration(s);
+      startGeneration(s, turn.id);
       scrollToBottom(false);
       return;
     }

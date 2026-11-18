@@ -305,13 +305,17 @@
     var ae = parseInt(t.activeEdit, 10);
     if (!(ae >= 0 && ae < edits.length)) ae = edits.length - 1;
 
-    // branch：这条消息挂在「哪条消息的哪个输入版本」下面。
-    // 切换输入版本后，挂在不活跃版本上的后续消息会自动隐藏（不删除）。
+    // branch：这条消息挂在「哪条消息的哪个输入版本 + 哪个回复版本」下面。
+    // 切换输入版本或切换回复版本后，挂在不活跃版本上的后续消息会自动隐藏（不删除）。
     var branch = null;
     if (t.branch && typeof t.branch.turnId === "string") {
       branch = {
         turnId: t.branch.turnId,
-        editIndex: parseInt(t.branch.editIndex, 10) || 0
+        editIndex: parseInt(t.branch.editIndex, 10) || 0,
+        // null 表示老数据不校验回复版本
+        replyIndex: (t.branch.replyIndex === null || t.branch.replyIndex === undefined)
+          ? null
+          : (parseInt(t.branch.replyIndex, 10) || 0)
       };
     }
 
@@ -348,6 +352,13 @@
         var parent = byId[b.turnId];
         if (!parent) return false;
         if ((parent.activeEdit || 0) !== (b.editIndex || 0)) return false;
+
+        // 回复版本也要校验：重新生成后，旧回复下面的对话应该自动隐藏
+        if (b.replyIndex !== null && b.replyIndex !== undefined) {
+          var pe = parent.edits[parent.activeEdit || 0];
+          if (pe && (pe.activeReply || 0) !== b.replyIndex) return false;
+        }
+
         b = parent.branch;
       }
       return true;
@@ -410,9 +421,12 @@
     // 老数据没有 branch，按顺序串成一条链，这样修改历史输入时后续才能正确隐藏
     for (var b = 1; b < out.length; b++) {
       if (!out[b].branch && out[b - 1]) {
+        var prevTurn = out[b - 1];
+        var prevEdit = prevTurn.edits[prevTurn.activeEdit || 0];
         out[b].branch = {
-          turnId: out[b - 1].id,
-          editIndex: out[b - 1].activeEdit || 0
+          turnId: prevTurn.id,
+          editIndex: prevTurn.activeEdit || 0,
+          replyIndex: prevEdit ? (prevEdit.activeReply || 0) : 0
         };
       }
     }
