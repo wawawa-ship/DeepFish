@@ -166,6 +166,8 @@
       ttsVoice: "tide",
       autoRead: false,
       autoMemory: true,
+      // 是否把「现在几点几分」也告诉模型（会让 system 变化，影响缓存命中）
+      showClock: false,
       agreedNotice: false,
       temperature: 1.0,
       maxTokens: 0,
@@ -246,6 +248,122 @@
     return out;
   }
 
+  /* ==================================================================
+     消息结构：一个「回合」= 用户输入（最多 6 个变体）+ 每个变体下的
+     模型输出（最多 6 个变体）。这样 6×6 = 36 种组合都能回看。
+     ================================================================== */
+  var MAX_VARIANTS = 6;
+
+  function normalizeReply(r) {
+    return {
+      id: r.id || uid("r"),
+      content: typeof r.content === "string" ? r.content : "",
+      reasoning: typeof r.reasoning === "string" ? r.reasoning : "",
+      model: r.model || "",
+      createdAt: r.createdAt || Date.now(),
+      error: !!r.error,
+      duration: typeof r.duration === "number" ? r.duration : 0,
+      citations: Array.isArray(r.citations) ? r.citations : [],
+      usage: r.usage || null,
+      cost: (r.cost && typeof r.cost === "object") ? {
+        cny: Number(r.cost.cny) || 0,
+        peak: !!r.cost.peak,
+        hit: Number(r.cost.hit) || 0,
+        miss: Number(r.cost.miss) || 0,
+        out: Number(r.cost.out) || 0,
+        searches: Number(r.cost.searches) || 0,
+        fetches: Number(r.cost.fetches) || 0
+      } : null
+    };
+  }
+
+  function normalizeEdit(e) {
+    var replies = Array.isArray(e.replies)
+      ? e.replies.filter(Boolean).slice(0, MAX_VARIANTS).map(normalizeReply)
+      : [];
+    if (!replies.length) replies = [normalizeReply({})];
+
+    var ai = parseInt(e.activeReply, 10);
+    if (!(ai >= 0 && ai < replies.length)) ai = replies.length - 1;
+
+    return {
+      id: e.id || uid("e"),
+      text: typeof e.text === "string" ? e.text : "",
+      createdAt: e.createdAt || Date.now(),
+      images: Array.isArray(e.images) ? e.images : [],
+      files: Array.isArray(e.files) ? e.files : [],
+      replies: replies,
+      activeReply: ai
+    };
+  }
+
+  function normalizeTurn(t) {
+    var edits = Array.isArray(t.edits) && t.edits.length
+      ? t.edits.filter(Boolean).slice(0, MAX_VARIANTS).map(normalizeEdit)
+      : [normalizeEdit({})];
+
+    var ae = parseInt(t.activeEdit, 10);
+    if (!(ae >= 0 && ae < edits.length)) ae = edits.length - 1;
+
+    return {
+      id: t.id || uid("u"),
+      role: "user",
+      createdAt: t.createdAt || Date.now(),
+      edits: edits,
+      activeEdit: ae
+    };
+  }
+
+  /* 把旧的扁平 user/assistant 列表迁移成新结构；新结构原样保留 */
+  function normalizeMessages(list) {
+    var out = [];
+    var cur = null;
+
+    (Array.isArray(list) ? list : []).forEach(function (m) {
+      if (!m) return;
+
+      if (m.edits && Array.isArray(m.edits)) {
+        cur = normalizeTurn(m);
+        out.push(cur);
+        return;
+      }
+
+      if (m.role === "assistant") {
+        if (!cur) return;
+        var edit = cur.edits[cur.edits.length - 1];
+        // 占位的那条空回复直接替换
+        if (edit.replies.length === 1 && !edit.replies[0].content && !edit.replies[0].error) {
+          edit.replies[0] = normalizeReply(m);
+        } else {
+          edit.replies.push(normalizeReply(m));
+        }
+        edit.activeReply = edit.replies.length - 1;
+        return;
+      }
+
+      if (m.role === "system") return;
+
+      cur = {
+        id: m.id || uid("u"),
+        role: "user",
+        createdAt: m.createdAt || Date.now(),
+        activeEdit: 0,
+        edits: [{
+          id: uid("e"),
+          text: typeof m.content === "string" ? m.content : "",
+          createdAt: m.createdAt || Date.now(),
+          images: Array.isArray(m.images) ? m.images : [],
+          files: Array.isArray(m.files) ? m.files : [],
+          replies: [normalizeReply({})],
+          activeReply: 0
+        }]
+      };
+      out.push(cur);
+    });
+
+    return out;
+  }
+
   function normalizeSession(s) {
     if (!s || typeof s !== "object") return null;
     var msgs = Array.isArray(s.messages) ? s.messages : [];
@@ -274,32 +392,7 @@
       memory: typeof s.memory === "string" ? s.memory : "",
       // 已经压缩到第几条消息（下次从这里接着往后续写记忆）
       memoryCovered: typeof s.memoryCovered === "number" ? s.memoryCovered : 0,
-      messages: msgs.map(function (m) {
-        return {
-          id: m.id || uid("m"),
-          role: m.role === "assistant" ? "assistant" : (m.role === "system" ? "system" : "user"),
-          content: typeof m.content === "string" ? m.content : "",
-          reasoning: typeof m.reasoning === "string" ? m.reasoning : "",
-          model: m.model || "",
-          createdAt: m.createdAt || Date.now(),
-          error: !!m.error,
-          duration: typeof m.duration === "number" ? m.duration : 0,
-          // 附件与引用
-          images: Array.isArray(m.images) ? m.images : [],
-          files: Array.isArray(m.files) ? m.files : [],
-          citations: Array.isArray(m.citations) ? m.citations : [],
-          // 本次回复的用量与费用（重启后仍可见）
-          cost: (m.cost && typeof m.cost === "object") ? {
-            cny: Number(m.cost.cny) || 0,
-            peak: !!m.cost.peak,
-            hit: Number(m.cost.hit) || 0,
-            miss: Number(m.cost.miss) || 0,
-            out: Number(m.cost.out) || 0,
-            searches: Number(m.cost.searches) || 0,
-            fetches: Number(m.cost.fetches) || 0
-          } : null
-        };
-      })
+      messages: normalizeMessages(msgs)
     };
   }
 

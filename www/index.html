@@ -376,6 +376,15 @@
         <span>自动整理长期记忆<em>每约 10 条压缩一次，每次少量 token</em></span>
         <input id="setAutoMemory" type="checkbox" checked>
       </label>
+
+      <label class="switch-row">
+        <span>告诉模型当前时间<em>精确到几点几分，让它能感知现实时间</em></span>
+        <input id="setClock" type="checkbox">
+      </label>
+      <span class="field-tip" style="margin-top:-6px">
+        开启后每次请求都会带上「现在几点几分」。注意：时间一直在变会让
+        system 内容变化，前面的缓存容易失效，会比关闭时略费 token。
+      </span>
       <label class="field">
         <span class="field-label">随机性 temperature <b id="tempVal">1.0</b></span>
         <input id="setTemp" type="range" min="0" max="2" step="0.1" value="1">

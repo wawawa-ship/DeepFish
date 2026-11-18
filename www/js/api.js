@@ -117,11 +117,12 @@
   /* 组装 system：角色设定 + 保持规则 + 工具说明合并成一条。
      多条 system 会互相打架（尤其"你现在可以使用联网搜索"这种助手口吻的说明，
      会直接把角色盖掉），所以只能合成一条。 */
-  function buildSystemPrompt(session) {
+  function buildSystemPrompt(session, settings) {
     var persona = (session && session.persona) || {};
     var base = String(persona.prompt || "").trim();
     var memory = String((session && session.memory) || "").trim();
-    if (!base && !memory) return "";
+    var showClock = !!(settings && settings.showClock);
+    if (!base && !memory && !showClock) return "";
 
     var name = String(persona.name || "").trim() || "助手";
     var chat = (session && session.chat) || {};
@@ -141,6 +142,13 @@
       parts.push("【长期记忆】");
       parts.push("以下是之前对话里发生过的事，请据此保持连贯，不要与它矛盾：");
       parts.push(memory);
+    }
+
+    if (showClock) {
+      parts.push("");
+      parts.push("【当前时间】");
+      parts.push("现在真实的时间是 " + clockText() + "。");
+      parts.push("请以这个时间为准，不要假设现在还是你训练数据里的年份或时刻。");
     }
 
     parts.push("");
@@ -208,24 +216,79 @@
     return { list: all.slice(ns), start: ns };
   }
 
+  /* 当前日期提醒：不告诉模型今天是几号，它联网时会默认还是训练时的年份 */
+  function pad2(n) {
+    return n < 10 ? "0" + n : "" + n;
+  }
+
+  function latestReminder() {
+    var d = new Date();
+    var days = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) +
+      "," + days[d.getDay()] + ",,App,中文";
+  }
+
+  /* 精确到分钟的当前时间（用户可在设置里开启） */
+  function clockText() {
+    var d = new Date();
+    var days = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) +
+      " " + days[d.getDay()] + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
   /* 组装发送给 API 的消息（含角色设定与上下文裁剪） */
   function buildMessages(session, settings) {
     var out = [];
-    var sys = buildSystemPrompt(session);
+    var sys = buildSystemPrompt(session, settings);
     if (sys) out.push({ role: "system", content: sys });
 
     var chat = session.chat || {};
     var useTools = !!chat.webSearch && modelOf(session) === "deepseek-flash";
 
-    var usable = session.messages.filter(function (m) {
-      return (m.role === "user" || m.role === "assistant") && (m.content || (m.images && m.images.length)) && !m.error;
+    // 把「回合」展开成 用户输入 + 当前选中回复 的序列
+    var flat = [];
+    (session.messages || []).forEach(function (turn) {
+      if (!turn || !turn.edits || !turn.edits.length) return;
+      var edit = turn.edits[turn.activeEdit] || turn.edits[0];
+      if (!edit) return;
+
+      var text = edit.text || "";
+      var hasAttach = (edit.images && edit.images.length) || (edit.files && edit.files.length);
+      if (!text && !hasAttach) return;
+
+      flat.push({
+        role: "user",
+        content: text,
+        images: edit.images,
+        files: edit.files,
+        createdAt: edit.createdAt
+      });
+
+      var reply = edit.replies[edit.activeReply] || edit.replies[0];
+      if (reply && reply.content && !reply.error) {
+        flat.push({
+          role: "assistant",
+          content: reply.content,
+          reasoning: reply.reasoning,
+          createdAt: reply.createdAt
+        });
+      }
     });
 
-    var picked = pickContext(session, usable, settings.contextBudget);
+    var picked = pickContext(session, flat, settings.contextBudget);
     if (session) session.ctxStart = picked.start;
     var slice = picked.list;
 
+    // 日期提醒必须紧跟最后一条用户消息
+    var lastUserIdx = -1;
+    for (var k = slice.length - 1; k >= 0; k--) {
+      if (slice[k].role === "user") { lastUserIdx = k; break; }
+    }
+
     for (var i = 0; i < slice.length; i++) {
+      if (i === lastUserIdx) {
+        out.push({ role: "latest_reminder", content: latestReminder() });
+      }
       out.push(messagePayload(slice[i], useTools));
     }
     return out;
