@@ -712,10 +712,11 @@ html[data-theme="light"] .msg-error { color: #b91c1c; }
 .msg-error svg { width: 17px; height: 17px; margin-top: 2px; }
 
 /* ---------- 回到底部 ---------- */
+/* 回到底部：挂在输入框上方（不能放在滚动容器里，否则会跟着内容跑） */
 .scroll-bottom {
   position: absolute;
   right: 16px;
-  bottom: 16px;
+  top: -56px;
   width: 40px; height: 40px;
   border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -732,6 +733,7 @@ html[data-theme="light"] .msg-error { color: #b91c1c; }
 /* ---------- 输入区 ---------- */
 .composer {
   flex: none;
+  position: relative;
   padding: 8px 10px calc(8px + var(--safe-bot));
   background: linear-gradient(to top, var(--bg) 30%, rgba(11, 18, 32, .82));
   border-top: 1px solid var(--line);
@@ -1964,3 +1966,29 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   }
 }
 
+
+/* 编辑态：输入框高亮 + 可点击的取消提示 */
+.composer-box.editing {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, .18);
+}
+.composer-hint.clickable {
+  /* 默认高度是 0，这里必须显式展开，否则按钮会被裁掉看不见 */
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-2);
+}
+.hint-text { font-size: 11px; }
+.hint-cancel {
+  padding: 5px 14px;
+  border-radius: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+.hint-cancel:active { background: var(--bg); }

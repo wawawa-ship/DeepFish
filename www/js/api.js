@@ -245,9 +245,13 @@
     var chat = session.chat || {};
     var useTools = !!chat.webSearch && modelOf(session) === "deepseek-flash";
 
-    // 把「回合」展开成 用户输入 + 当前选中回复 的序列
+    // 把「回合」展开成 用户输入 + 当前选中回复 的序列（只取当前分支可见的）
     var flat = [];
-    (session.messages || []).forEach(function (turn) {
+    var turns = (typeof Store !== "undefined" && Store.visibleTurns)
+      ? Store.visibleTurns(session)
+      : (session.messages || []);
+
+    turns.forEach(function (turn) {
       if (!turn || !turn.edits || !turn.edits.length) return;
       var edit = turn.edits[turn.activeEdit] || turn.edits[0];
       if (!edit) return;

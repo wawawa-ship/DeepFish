@@ -305,13 +305,59 @@
     var ae = parseInt(t.activeEdit, 10);
     if (!(ae >= 0 && ae < edits.length)) ae = edits.length - 1;
 
+    // branch：这条消息挂在「哪条消息的哪个输入版本」下面。
+    // 切换输入版本后，挂在不活跃版本上的后续消息会自动隐藏（不删除）。
+    var branch = null;
+    if (t.branch && typeof t.branch.turnId === "string") {
+      branch = {
+        turnId: t.branch.turnId,
+        editIndex: parseInt(t.branch.editIndex, 10) || 0
+      };
+    }
+
     return {
       id: t.id || uid("u"),
       role: "user",
       createdAt: t.createdAt || Date.now(),
       edits: edits,
-      activeEdit: ae
+      activeEdit: ae,
+      branch: branch
     };
+  }
+
+  /* 当前真正要显示 / 发送的回合：沿 branch 链检查父节点的输入版本是否被选中 */
+  function visibleTurns(session) {
+    var all = (session && session.messages) || [];
+    if (!all.length) return [];
+
+    // 老数据没有 branch，全部可见
+    var hasBranch = false;
+    for (var k = 0; k < all.length; k++) {
+      if (all[k] && all[k].branch) { hasBranch = true; break; }
+    }
+    if (!hasBranch) return all.slice();
+
+    var byId = {};
+    for (var i = 0; i < all.length; i++) byId[all[i].id] = all[i];
+
+    function chainOk(turn) {
+      var b = turn.branch;
+      var guard = 0;
+      while (b) {
+        if (++guard > 500) return false;
+        var parent = byId[b.turnId];
+        if (!parent) return false;
+        if ((parent.activeEdit || 0) !== (b.editIndex || 0)) return false;
+        b = parent.branch;
+      }
+      return true;
+    }
+
+    var out = [];
+    for (var j = 0; j < all.length; j++) {
+      if (chainOk(all[j])) out.push(all[j]);
+    }
+    return out;
   }
 
   /* 把旧的扁平 user/assistant 列表迁移成新结构；新结构原样保留 */
@@ -361,6 +407,16 @@
       out.push(cur);
     });
 
+    // 老数据没有 branch，按顺序串成一条链，这样修改历史输入时后续才能正确隐藏
+    for (var b = 1; b < out.length; b++) {
+      if (!out[b].branch && out[b - 1]) {
+        out[b].branch = {
+          turnId: out[b - 1].id,
+          editIndex: out[b - 1].activeEdit || 0
+        };
+      }
+    }
+
     return out;
   }
 
@@ -388,6 +444,10 @@
         model: typeof cs.model === "string" ? cs.model : ""
       },
       background: typeof s.background === "string" ? s.background : "",
+      // 输入框草稿：切换对话时各自保留，不会串到别的对话
+      draft: typeof s.draft === "string" ? s.draft : "",
+      // 草稿里还没发出去的图片 / 文件
+      draftAttachments: Array.isArray(s.draftAttachments) ? s.draftAttachments : [],
       // 长期记忆：自动整理的对话摘要 + 用户补充，超出窗口后靠它保住人设
       memory: typeof s.memory === "string" ? s.memory : "",
       // 已经压缩到第几条消息（下次从这里接着往后续写记忆）
@@ -628,6 +688,7 @@
     exportFile: exportFile,
     buildExport: buildExport,
     importData: importData,
+    visibleTurns: visibleTurns,
     clearAll: clearAll,
     createSnapshot: createSnapshot,
     listSnapshots: listSnapshots,

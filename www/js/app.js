@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.12.2";
+  var AppVersion = "1.14.2";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -557,11 +557,19 @@
     return box;
   }
 
+  var WELCOME_LINES = [
+    "你好，我能帮什么忙吗？",
+    "欢迎回来，想从哪里开始？",
+    "你好，让我们开始聊天吧",
+    "欢迎回来，随时开始吧"
+  ];
+
   function welcomeHtml() {
     var p = personaOf(getSession());
+    var line = WELCOME_LINES[Math.floor(Math.random() * WELCOME_LINES.length)];
     var html = '<div class="welcome">' +
       '<img class="welcome-avatar" src="' + esc(avatarOf(p)) + '" alt="">' +
-      "<h2>你好，有什么我能帮你的吗？</h2>";
+      "<h2>" + line + "</h2>";
 
     if (!settings.apiKey) {
       html += '<button class="setup-tip" type="button" id="setupKey">' +
@@ -602,7 +610,13 @@
     $messages.innerHTML = "";
     shownCount = 0;
 
-    if (!s || s.messages.length === 0) {
+    if (!s) {
+      $messages.innerHTML = welcomeHtml();
+      return;
+    }
+
+    var vis = Store.visibleTurns(s);
+    if (!vis.length) {
       $messages.innerHTML = welcomeHtml();
       return;
     }
@@ -615,14 +629,15 @@
     var s = getSession();
     if (!s) return;
 
-    var total = s.messages.length;
+    var vis = Store.visibleTurns(s);
+    var total = vis.length;
     var start = Math.max(0, total - shownCount - n);
     var end = total - shownCount;
     if (end <= start) return;
 
     var frag = document.createDocumentFragment();
     for (var i = start; i < end; i++) {
-      frag.appendChild(turnNode(s.messages[i]));
+      frag.appendChild(turnNode(vis[i]));
     }
 
     var wrap = $("loadMoreWrap");
@@ -709,8 +724,12 @@
     if (kw) {
       arr = arr.filter(function (s) {
         if (s.title.toLowerCase().indexOf(kw) !== -1) return true;
-        for (var i = 0; i < s.messages.length; i++) {
-          if ((s.messages[i].content || "").toLowerCase().indexOf(kw) !== -1) return true;
+        var vis = Store.visibleTurns(s);
+        for (var i = 0; i < vis.length; i++) {
+          var ed = vis[i].edits[vis[i].activeEdit] || vis[i].edits[0];
+          if (ed && String(ed.text || "").toLowerCase().indexOf(kw) !== -1) return true;
+          var rp = ed && (ed.replies[ed.activeReply] || ed.replies[0]);
+          if (rp && String(rp.content || "").toLowerCase().indexOf(kw) !== -1) return true;
         }
         return false;
       });
@@ -732,7 +751,8 @@
         lastGroup = g;
       }
       var active = s.id === state.activeId ? " active" : "";
-      var lastTurn = s.messages[s.messages.length - 1];
+      var visList = Store.visibleTurns(s);
+      var lastTurn = visList.length ? visList[visList.length - 1] : null;
       var lastEdit = lastTurn && lastTurn.edits
         ? (lastTurn.edits[lastTurn.activeEdit] || lastTurn.edits[0]) : null;
       var lastRep = lastEdit && lastEdit.replies
@@ -826,7 +846,7 @@
     // 模型名可能变了，刷新顶栏与欢迎页提示
     renderTopbar();
     var s = getSession();
-    if (!s || !s.messages.length) {
+    if (!s || !Store.visibleTurns(s).length) {
       $messages.innerHTML = welcomeHtml();
     }
   }
@@ -876,7 +896,8 @@
      发送 / 生成
      ================================================================== */
   function updateSendState() {
-    var has = $input.value.trim().length > 0;
+    var attached = (pendingAttachments && pendingAttachments.length) || 0;
+    var has = $input.value.trim().length > 0 || attached > 0;
     $sendBtn.disabled = !has && !streaming;
     $sendBtn.classList.toggle("hidden", streaming);
     $stopBtn.classList.toggle("hidden", !streaming);
@@ -907,6 +928,81 @@
     session.updatedAt = Date.now();
   }
 
+  /* 正在修改的那一条（null 表示普通发送） */
+  var editingTurnId = null;
+
+  function updateEditingHint() {
+    var box = $("composerBox");
+    var hint = $("composerHint");
+    if (!hint) return;
+
+    if (editingTurnId) {
+      box.classList.add("editing");
+      hint.innerHTML =
+        '<span class="hint-text">正在修改已发送的内容</span>' +
+        '<button type="button" class="hint-cancel" id="btnCancelEdit">取消修改</button>';
+      hint.classList.add("clickable");
+    } else {
+      box.classList.remove("editing");
+      hint.innerHTML = "";
+      hint.classList.remove("clickable");
+    }
+  }
+
+  /* 退出修改模式；clearInput 为 true 时连输入框一起清空 */
+  function exitEditing(clearInput) {
+    if (!editingTurnId) return false;
+    editingTurnId = null;
+    if (clearInput) {
+      $input.value = "";
+      clearAttachments();
+      autoResize();
+    }
+    updateSendState();
+    updateEditingHint();
+    return true;
+  }
+
+  /* 把修改后的内容写成这条输入的一个新版本 */
+  function commitEdit(f, text, atts) {
+    var s = f.session;
+    var turn = f.turn;
+
+    if (turn.edits.length >= 6) {
+      toast("同一条输入最多 6 个版本", 2400);
+      return;
+    }
+
+    // 不再删除后面的对话：它们的 branch 指向旧版本，切换后会自然隐藏
+    turn.edits.push({
+      id: Store.uid("e"),
+      text: text,
+      createdAt: Date.now(),
+      images: atts.filter(function (a) { return a.type === "image"; }).map(function (a) { return a.dataUrl; }),
+      files: atts.filter(function (a) { return a.type === "file"; }).map(function (a) { return { name: a.name, text: a.text }; }),
+      replies: [{
+        id: Store.uid("r"), content: "", reasoning: "",
+        model: API.modelOf(s), createdAt: Date.now()
+      }],
+      activeReply: 0
+    });
+    turn.activeEdit = turn.edits.length - 1;
+
+    editingTurnId = null;
+    $input.value = "";
+    clearAttachments();
+    autoResize();
+    updateSendState();
+    updateEditingHint();
+
+    renderMessages();
+    renderDrawer();
+    Store.save();
+    setStreaming(false);
+    startGeneration(s);
+    snapToBottom();
+  }
+
   function doSend() {
     if (streaming) return;
     var text = $input.value.trim();
@@ -916,6 +1012,34 @@
       toast("请先填写 API Key");
       openSettings();
       return;
+    }
+
+    // 修改已发送的内容：走另一条路径
+    if (editingTurnId) {
+      var ef = findTurn(editingTurnId);
+      if (ef) {
+        var visEf = Store.visibleTurns(ef.session);
+        var posEf = -1;
+        for (var vi = 0; vi < visEf.length; vi++) {
+          if (visEf[vi].id === ef.turn.id) { posEf = vi; break; }
+        }
+        var rest = posEf >= 0 ? (visEf.length - 1 - posEf) : 0;
+
+        if (rest > 0) {
+          confirmDialog(
+            "修改这条输入？",
+            "后面还有 " + rest + " 条对话，会先隐藏起来。切回这条输入原来的版本就能再看到它们。",
+            "修改"
+          ).then(function (ok) {
+            if (ok) commitEdit(ef, text, atts);
+          });
+          return;
+        }
+        commitEdit(ef, text, atts);
+        return;
+      }
+      editingTurnId = null;
+      updateEditingHint();
     }
 
     lastUserText = text;
@@ -934,10 +1058,19 @@
       session.title = trimTitle(text || (atts.length ? "图片 / 文件" : "新对话"));
     }
 
+    // 内容已发出，清掉这个对话的草稿
+    session.draft = "";
+    session.draftAttachments = [];
+
+    // 新消息挂在「当前可见的最后一条」的当前输入版本下
+    var visNow = Store.visibleTurns(session);
+    var lastVis = visNow.length ? visNow[visNow.length - 1] : null;
+
     addMessage(session, {
       id: Store.uid("u"),
       role: "user",
       createdAt: Date.now(),
+      branch: lastVis ? { turnId: lastVis.id, editIndex: lastVis.activeEdit } : null,
       edits: [{
         id: Store.uid("e"),
         text: text,
@@ -957,7 +1090,8 @@
   }
 
   function startGeneration(session) {
-    var turn = session.messages[session.messages.length - 1];
+    var vis = Store.visibleTurns(session);
+    var turn = vis.length ? vis[vis.length - 1] : null;
     if (!turn || !turn.edits || !turn.edits.length) { setStreaming(false); return; }
 
     var edit = turn.edits[turn.activeEdit] || turn.edits[0];
@@ -1186,6 +1320,37 @@
   /* ==================================================================
      消息操作
      ================================================================== */
+  /* 切换对话：各自保留草稿，并退出修改模式，避免内容串到别的对话 */
+  function switchToSession(sid) {
+    if (state.activeId === sid) { closeDrawer(); return; }
+
+    var prev = getSession();
+
+    if (editingTurnId) {
+      // 正在改别的对话的内容，直接丢弃
+      exitEditing(true);
+    } else if (prev) {
+      prev.draft = $input.value;
+      prev.draftAttachments = pendingAttachments.slice();
+    }
+
+    state.activeId = sid;
+    closeDrawer();
+
+    var cur = getSession();
+    $input.value = (cur && cur.draft) || "";
+    pendingAttachments = (cur && cur.draftAttachments) ? cur.draftAttachments.slice() : [];
+    renderAttachments();
+    autoResize();
+    updateSendState();
+
+    renderMessages();
+    renderTopbar();
+    renderDrawer();
+    snapToBottom();
+    Store.save();
+  }
+
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       return navigator.clipboard.writeText(text);
@@ -1231,6 +1396,19 @@
     old.parentNode.replaceChild(turnNode(turn), old);
   }
 
+  /* 切换版本后，后面的分支可能整段出现或消失，所以要整体重排 */
+  function refreshAfterSwitch(turn) {
+    var old = document.querySelector('.turn-block[data-turn="' + turn.id + '"]');
+    var prevTop = old ? old.getBoundingClientRect().top : null;
+
+    renderMessages();
+
+    var neu = document.querySelector('.turn-block[data-turn="' + turn.id + '"]');
+    if (neu && prevTop !== null) {
+      $chat.scrollTop += (neu.getBoundingClientRect().top - prevTop);
+    }
+  }
+
   function handleAction(act, turnId, side, replyId) {
     var f = findTurn(turnId);
     if (!f) return;
@@ -1251,7 +1429,7 @@
         var m = edit.replies.length;
         edit.activeReply = (edit.activeReply + dir + m) % m;
       }
-      refreshTurn(turn);
+      refreshAfterSwitch(turn);
       s.updatedAt = Date.now();
       Store.save();
       return;
@@ -1276,9 +1454,16 @@
     }
 
     if (act === "del") {
-      confirmDialog("删除这一轮对话？", "这条输入和它下面的所有版本都会一起删除。", "删除").then(function (ok) {
+      confirmDialog("删除这一轮对话？", "这条输入和它下面的各个版本都会一起删除。", "删除").then(function (ok) {
         if (!ok) return;
+        var deadId = turn.id;
         s.messages.splice(f.index, 1);
+
+        // 挂在被删消息下面的分支已经找不到父节点了，把它们挪回根分支，避免永久隐藏
+        s.messages.forEach(function (t) {
+          if (t.branch && t.branch.turnId === deadId) t.branch = null;
+        });
+
         s.updatedAt = Date.now();
         renderMessages();
         renderDrawer();
@@ -1310,42 +1495,27 @@
       return;
     }
 
-    // 修改自己说过的话：新开一个输入版本，原来的回复保留
+    // 修改自己说过的话：把内容放回输入框，改完再发出去
     if (act === "editmsg") {
-      openInputModal("修改这句话", edit.text, "保存后会重新生成回复，原来的版本会保留，可以用下方箭头切回来。")
-        .then(function (val) {
-          if (val === null || val === undefined) return;
-          var text = String(val).trim();
-          if (!text || text === edit.text) return;
+      var curEdit = turn.edits[turn.activeEdit] || turn.edits[0];
 
-          if (turn.edits.length >= 6) {
-            toast("同一条输入最多 6 个版本", 2400);
-            return;
-          }
+      editingTurnId = turn.id;
+      $input.value = curEdit.text || "";
 
-          turn.edits.push({
-            id: Store.uid("e"),
-            text: text,
-            createdAt: Date.now(),
-            images: edit.images || [],
-            files: edit.files || [],
-            replies: [{
-              id: Store.uid("r"),
-              content: "",
-              reasoning: "",
-              model: API.modelOf(s),
-              createdAt: Date.now()
-            }],
-            activeReply: 0
-          });
-          turn.activeEdit = turn.edits.length - 1;
+      pendingAttachments = [];
+      (curEdit.images || []).forEach(function (url) {
+        pendingAttachments.push({ type: "image", dataUrl: url });
+      });
+      (curEdit.files || []).forEach(function (f) {
+        pendingAttachments.push({ type: "file", name: f.name, text: f.text });
+      });
 
-          refreshTurn(turn);
-          Store.save();
-          setStreaming(false);
-          startGeneration(s);
-          scrollToBottom(false);
-        });
+      renderAttachments();
+      autoResize();
+      updateSendState();
+      updateEditingHint();
+      try { $input.focus(); } catch (e) { }
+      scrollToBottom(false);
       return;
     }
   }
@@ -1496,13 +1666,7 @@
     $("scrim").addEventListener("click", closeDrawer);
     $("btnNew").addEventListener("click", function () {
       if (streaming) { toast("正在生成，请先停止"); return; }
-      state.activeId = null;
-      $input.value = "";
-      autoResize();
-      updateSendState();
-      renderMessages();
-      renderTopbar();
-      renderDrawer();
+      switchToSession(null);
       $input.focus();
     });
 
@@ -1756,12 +1920,7 @@
       var item = e.target.closest ? e.target.closest("[data-sid]") : null;
       if (item) {
         if (streaming) { toast("正在生成，请先停止"); return; }
-        state.activeId = item.getAttribute("data-sid");
-        closeDrawer();
-        renderMessages();
-        renderTopbar();
-        renderDrawer();
-        snapToBottom();
+        switchToSession(item.getAttribute("data-sid"));
       }
     });
 
@@ -2013,6 +2172,14 @@
 
     // 滚动
     $chat.addEventListener("scroll", onScroll, { passive: true });
+
+    // 取消「修改已发送内容」
+    $("composerHint").addEventListener("click", function (e) {
+      if (!editingTurnId) return;
+      e.stopPropagation();
+      exitEditing(true);
+      toast("已取消修改", 1400);
+    });
     $("btnScrollBottom").addEventListener("click", function () {
       autoScroll = true;
       scrollToBottom(true);
@@ -2355,6 +2522,7 @@
       strip.hidden = true;
       strip.innerHTML = "";
       $("btnAttach").classList.remove("has-items");
+      updateSendState();
       return;
     }
     strip.hidden = false;
@@ -2372,6 +2540,7 @@
       }
     });
     strip.innerHTML = html;
+    updateSendState();
   }
 
   function clearAttachments() {
