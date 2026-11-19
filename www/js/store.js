@@ -186,7 +186,25 @@
       schemaVersion: SCHEMA_VERSION,
       settings: defaultSettings(),
       sessions: [],
-      activeId: null
+      activeId: null,
+      // 收藏的输入 / 输出：{ id, sessionId, turnId, side, editIndex, replyIndex, preview, at }
+      favorites: []
+    };
+  }
+
+  /* 收藏项规范化 */
+  function normalizeFav(f) {
+    if (!f || !f.sessionId || !f.turnId) return null;
+    return {
+      id: f.id || uid("f"),
+      sessionId: String(f.sessionId),
+      turnId: String(f.turnId),
+      side: f.side === "ai" ? "ai" : "user",
+      editIndex: parseInt(f.editIndex, 10) || 0,
+      replyIndex: f.replyIndex === null || f.replyIndex === undefined
+        ? null : (parseInt(f.replyIndex, 10) || 0),
+      preview: String(f.preview || "").slice(0, 200),
+      at: Number(f.at) || Date.now()
     };
   }
 
@@ -244,6 +262,11 @@
     }
 
     out.activeId = st.activeId || (out.sessions[0] && out.sessions[0].id) || null;
+
+    // 收藏（可能来自旧备份，没有就是空）
+    if (Array.isArray(st.favorites)) {
+      out.favorites = st.favorites.map(normalizeFav).filter(Boolean);
+    }
     out.schemaVersion = SCHEMA_VERSION;
     return out;
   }
@@ -633,6 +656,7 @@
       exportedAt: new Date().toISOString(),
       settings: st.settings,
       sessions: st.sessions,
+      favorites: st.favorites || [],
       activeId: st.activeId
     };
   }

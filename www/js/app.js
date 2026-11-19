@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.16.4";
+  var AppVersion = "1.18.2";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -365,6 +365,8 @@
   var ICON_SPEAK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/></svg>';
   var ICON_DEL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>';
   var ICON_EDIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18 10a2.8 2.8 0 10-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
+  var ICON_STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 10.2l5.4-.8z"/></svg>';
+  var ICON_PIN = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3v2h-4.5V21l-.5 1-.5-1v-6H7v-2l3-3z"/></svg>';
 
   function iconAct(act, turnId, icon, label, side) {
     return '<button class="act" type="button" data-act="' + act + '" data-turn="' + turnId +
@@ -390,6 +392,7 @@
     var html = "";
     html += iconAct("copy", id, ICON_COPY, "复制", "user");
     html += iconAct("editmsg", id, ICON_EDIT, "修改这句话", "user");
+    html += starBtn(turn, "user", turn.activeEdit, null, getSession());
     html += iconAct("del", id, ICON_DEL, "删除", "user");
     return html;
   }
@@ -400,6 +403,8 @@
     html += iconAct("copy", id, ICON_COPY, "复制", "ai");
     html += iconAct("retry", id, ICON_RETRY, "重新生成", "ai");
     html += iconAct("speak", id, ICON_SPEAK, "朗读", "ai");
+    var edit = turn.edits[turn.activeEdit] || turn.edits[0];
+    html += starBtn(turn, "ai", turn.activeEdit, edit ? edit.activeReply : 0, getSession());
     if (reply && reply.cost) {
       html += '<button class="act usage-btn" type="button" data-act="usage" data-side="ai"' +
         ' data-turn="' + id + '" data-reply="' + reply.id + '" aria-label="查看用量">' +
@@ -407,6 +412,15 @@
     }
     html += iconAct("del", id, ICON_DEL, "删除", "ai");
     return html;
+  }
+
+  /* 收藏星标按钮 */
+  function starBtn(turn, side, editIndex, replyIndex, session) {
+    var on = isFav(session && session.id, turn.id, side, editIndex, replyIndex);
+    return '<button class="act' + (on ? " starred" : "") + '" type="button" data-act="star"' +
+      ' data-turn="' + turn.id + '" data-side="' + side + '"' +
+      ' data-ei="' + editIndex + '" data-ri="' + (replyIndex === null ? "" : replyIndex) + '"' +
+      ' aria-label="' + (on ? "取消收藏" : "收藏") + '">' + ICON_STAR + "</button>";
   }
 
   /* 展开的用量明细 */
@@ -613,93 +627,140 @@
      同时解析 Markdown 把低端机卡死。
      ================================================================== */
   var PAGE_SIZE = 30;
-  var shownCount = 0;
+  /* 当前渲染的是 [viewStart, viewEnd) 这一段。
+     默认在末尾，跳转到旧消息时直接渲染那一条附近的一段（而不是从末尾往上堆）。 */
+  var viewStart = 0;
+  var viewEnd = 0;
   var loadingOlder = false;
 
-  function renderMessages() {
+  function renderMessages(focusTurnId) {
     var s = getSession();
     applyChatBackground(s);
-    $messages.innerHTML = "";
-    shownCount = 0;
 
     if (!s) {
       $messages.innerHTML = welcomeHtml();
+      viewStart = viewEnd = 0;
       return;
     }
 
     var vis = Store.visibleTurns(s);
     if (!vis.length) {
       $messages.innerHTML = welcomeHtml();
+      viewStart = viewEnd = 0;
       return;
     }
 
-    appendTail(PAGE_SIZE);
+    // 跳转场景：直接渲染目标那一段，避免「先渲染尾部再重排」造成的闪烁
+    if (focusTurnId) {
+      var pos = -1;
+      for (var i = 0; i < vis.length; i++) {
+        if (vis[i].id === focusTurnId) { pos = i; break; }
+      }
+      if (pos >= 0) {
+        var st = Math.max(0, pos - Math.floor(PAGE_SIZE / 2));
+        var en = Math.min(vis.length, st + PAGE_SIZE);
+        if (en - st < PAGE_SIZE) st = Math.max(0, en - PAGE_SIZE);
+        renderWindow(st, en);
+        return;
+      }
+    }
+
+    // 默认停在最新一段
+    renderWindow(Math.max(0, vis.length - PAGE_SIZE), vis.length);
   }
 
-  /* 从末尾往前追加 n 条，不动已经渲染好的节点 */
-  function appendTail(n) {
+  function loadMoreEl(dir, remain) {
+    var wrap = document.createElement("div");
+    wrap.className = "load-more-wrap";
+    wrap.innerHTML = '<button type="button" class="load-more" data-more="' + dir + '">' +
+      (dir === "earlier"
+        ? "加载更早的 " + Math.min(PAGE_SIZE, remain) + " 条 · 还剩 " + remain + " 条"
+        : "加载更晚的 " + Math.min(PAGE_SIZE, remain) + " 条 · 还剩 " + remain + " 条") +
+      "</button>";
+    return wrap;
+  }
+
+  /* 渲染任意区间 [start, end)，两头带「加载更早 / 更晚」 */
+  function renderWindow(start, end) {
     var s = getSession();
     if (!s) return;
 
     var vis = Store.visibleTurns(s);
     var total = vis.length;
-    var start = Math.max(0, total - shownCount - n);
-    var end = total - shownCount;
-    if (end <= start) return;
 
+    start = Math.max(0, Math.min(start, total));
+    end = Math.max(start, Math.min(end, total));
+
+    viewStart = start;
+    viewEnd = end;
+
+    // 先在离屏片段里全部建好，再一次性替换（避免中途出现空白帧）
     var frag = document.createDocumentFragment();
-    for (var i = start; i < end; i++) {
-      frag.appendChild(turnNode(vis[i]));
-    }
+    if (start > 0) frag.appendChild(loadMoreEl("earlier", start));
 
-    var wrap = $("loadMoreWrap");
-    if (wrap && wrap.parentNode === $messages) {
-      $messages.insertBefore(frag, wrap.nextSibling);
+    for (var i = start; i < end; i++) frag.appendChild(turnNode(vis[i]));
+
+    if (end < total) frag.appendChild(loadMoreEl("later", total - end));
+
+    if ($messages.replaceChildren) {
+      $messages.replaceChildren(frag);
     } else {
+      $messages.innerHTML = "";
       $messages.appendChild(frag);
-    }
-
-    shownCount += (end - start);
-    refreshLoadMore(total);
-  }
-
-  function refreshLoadMore(total) {
-    var wrap = $("loadMoreWrap");
-    var remain = total - shownCount;
-
-    if (remain <= 0) {
-      if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
-      return;
-    }
-
-    if (!wrap || wrap.parentNode !== $messages) {
-      wrap = document.createElement("div");
-      wrap.id = "loadMoreWrap";
-      wrap.className = "load-more-wrap";
-      wrap.innerHTML = '<button type="button" class="load-more" id="loadMoreBtn"></button>';
-      $messages.insertBefore(wrap, $messages.firstChild);
-    }
-
-    var btn = $("loadMoreBtn");
-    if (btn) {
-      btn.textContent = "加载更早的 " + Math.min(PAGE_SIZE, remain) + " 条 · 还剩 " + remain + " 条";
     }
   }
 
   function loadOlder() {
-    if (loadingOlder || !getSession()) return;
+    if (loadingOlder || !getSession() || viewStart <= 0) return;
     loadingOlder = true;
+
+    var s = getSession();
+    var vis = Store.visibleTurns(s);
+    var newStart = Math.max(0, viewStart - PAGE_SIZE);
 
     var beforeH = $chat.scrollHeight;
     var beforeTop = $chat.scrollTop;
 
-    appendTail(PAGE_SIZE);
+    var frag = document.createDocumentFragment();
+    for (var i = newStart; i < viewStart; i++) frag.appendChild(turnNode(vis[i]));
 
-    // 插到顶部后把视口「钉」在原处，避免内容跳动
-    var afterH = $chat.scrollHeight;
-    $chat.scrollTop = beforeTop + (afterH - beforeH);
+    var topWrap = $messages.querySelector('[data-more="earlier"]');
+    if (topWrap && topWrap.parentNode) topWrap.parentNode.removeChild(topWrap);
+
+    if (newStart > 0) {
+      var w = loadMoreEl("earlier", newStart);
+      $messages.insertBefore(w, $messages.firstChild);
+      $messages.insertBefore(frag, w.nextSibling);
+    } else {
+      $messages.insertBefore(frag, $messages.firstChild);
+    }
+
+    viewStart = newStart;
+    $chat.scrollTop = beforeTop + ($chat.scrollHeight - beforeH);
 
     loadingOlder = false;
+  }
+
+  function loadNewer() {
+    var s = getSession();
+    if (!s) return;
+
+    var vis = Store.visibleTurns(s);
+    var total = vis.length;
+    if (viewEnd >= total) return;
+
+    var newEnd = Math.min(total, viewEnd + PAGE_SIZE);
+
+    var frag = document.createDocumentFragment();
+    for (var i = viewEnd; i < newEnd; i++) frag.appendChild(turnNode(vis[i]));
+
+    var botWrap = $messages.querySelector('[data-more="later"]');
+    if (botWrap && botWrap.parentNode) botWrap.parentNode.removeChild(botWrap);
+
+    $messages.appendChild(frag);
+    viewEnd = newEnd;
+
+    if (viewEnd < total) $messages.appendChild(loadMoreEl("later", total - viewEnd));
   }
 
   function modelLabel(s) {
@@ -728,60 +789,105 @@
   /* ==================================================================
      渲染：会话抽屉
      ================================================================== */
-  function renderDrawer() {
-    var list = $("sessionList");
-    var kw = ($("searchSessions").value || "").trim().toLowerCase();
-    var arr = sortedSessions();
+  /* 批量管理模式 */
+  var bulkMode = false;
+  var bulkSelected = {};
 
-    if (kw) {
-      arr = arr.filter(function (s) {
-        if (s.title.toLowerCase().indexOf(kw) !== -1) return true;
-        var vis = Store.visibleTurns(s);
-        for (var i = 0; i < vis.length; i++) {
-          var ed = vis[i].edits[vis[i].activeEdit] || vis[i].edits[0];
-          if (ed && String(ed.text || "").toLowerCase().indexOf(kw) !== -1) return true;
-          var rp = ed && (ed.replies[ed.activeReply] || ed.replies[0]);
-          if (rp && String(rp.content || "").toLowerCase().indexOf(kw) !== -1) return true;
-        }
-        return false;
-      });
+  function bulkCount() {
+    var n = 0;
+    for (var k in bulkSelected) if (bulkSelected[k]) n++;
+    return n;
+  }
+
+  function setBulkMode(on) {
+    bulkMode = !!on;
+    bulkSelected = {};
+    var bar = $("bulkBar");
+    if (bar) bar.hidden = !bulkMode;
+    renderDrawer();
+  }
+
+  function updateBulkBar() {
+    var bar = $("bulkBar");
+    if (!bar) return;
+    var n = bulkCount();
+    var btns = bar.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = n === 0;
+  }
+
+  function sessRow(s) {
+    var active = s.id === state.activeId ? " active" : "";
+    var picked = bulkMode && bulkSelected[s.id] ? " on" : "";
+    var bulkCls = bulkMode ? " bulk" : "";
+
+    var visList = Store.visibleTurns(s);
+    var lastTurn = visList.length ? visList[visList.length - 1] : null;
+    var lastEdit = lastTurn && lastTurn.edits
+      ? (lastTurn.edits[lastTurn.activeEdit] || lastTurn.edits[0]) : null;
+    var lastRep = lastEdit && lastEdit.replies
+      ? (lastEdit.replies[lastEdit.activeReply] || lastEdit.replies[0]) : null;
+    var lastText = (lastRep && lastRep.content) || (lastEdit && lastEdit.text) || "";
+    var sub = lastText ? plainPreview(String(lastText).slice(0, 3000)).slice(0, 40) : "空对话";
+    var sp = personaOf(s);
+
+    var html = '<div class="sess' + active + picked + bulkCls + '" data-sid="' + s.id + '">';
+    if (bulkMode) html += '<span class="sess-check"></span>';
+    html += '<img class="sess-avatar" src="' + esc(avatarOf(sp)) + '" alt="">' +
+      '<div class="sess-main"><div class="sess-title">' + esc(s.title) + "</div>" +
+      '<div class="sess-sub">' + esc(sub) + "</div></div>";
+
+    if (!bulkMode) {
+      html += '<button class="sess-pin' + (s.pinned ? " on" : "") + '" type="button" data-pin="' + s.id +
+        '" aria-label="' + (s.pinned ? "取消置顶" : "置顶") + '">' + ICON_PIN + "</button>" +
+        '<button class="sess-del" type="button" data-del="' + s.id + '" aria-label="删除对话">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>' +
+        "</button>";
     }
 
+    return html + "</div>";
+  }
+
+  function renderDrawer() {
+    var list = $("sessionList");
+    var arr = sortedSessions();
+
+    var bar = $("bulkBar");
+    if (bar) bar.hidden = !bulkMode;
+
     if (!arr.length) {
-      list.innerHTML = '<div class="empty-tip">' +
-        (kw ? "没有找到匹配的对话" : "还没有对话记录<br>点击右上角 + 开始新对话") + "</div>";
+      list.innerHTML = '<div class="empty-tip">还没有对话记录<br>点击右上角 + 开始新对话</div>';
+      updateBulkBar();
       return;
     }
 
-    var html = "";
-    var lastGroup = "";
+    var pinned = [];
+    var normal = [];
     for (var i = 0; i < arr.length; i++) {
-      var s = arr[i];
+      (arr[i].pinned ? pinned : normal).push(arr[i]);
+    }
+
+    var html = "";
+
+    // 置顶区（没人置顶时整段不出现）
+    if (pinned.length) {
+      html += '<div class="sess-group">置顶</div>';
+      for (var p = 0; p < pinned.length; p++) html += sessRow(pinned[p]);
+      if (normal.length) html += '<div class="sess-divider"></div>';
+    }
+
+    var lastGroup = "";
+    for (var j = 0; j < normal.length; j++) {
+      var s = normal[j];
       var g = dayLabel(s.updatedAt);
       if (g !== lastGroup) {
         html += '<div class="sess-group">' + esc(g) + "</div>";
         lastGroup = g;
       }
-      var active = s.id === state.activeId ? " active" : "";
-      var visList = Store.visibleTurns(s);
-      var lastTurn = visList.length ? visList[visList.length - 1] : null;
-      var lastEdit = lastTurn && lastTurn.edits
-        ? (lastTurn.edits[lastTurn.activeEdit] || lastTurn.edits[0]) : null;
-      var lastRep = lastEdit && lastEdit.replies
-        ? (lastEdit.replies[lastEdit.activeReply] || lastEdit.replies[0]) : null;
-      var lastText = (lastRep && lastRep.content) || (lastEdit && lastEdit.text) || "";
-      // 只取前 3000 字做预览，避免超长消息让抽屉列表变慢
-      var sub = lastText ? plainPreview(String(lastText).slice(0, 3000)).slice(0, 40) : "空对话";
-      var sp = personaOf(s);
-      html += '<div class="sess' + active + '" data-sid="' + s.id + '">' +
-        '<img class="sess-avatar" src="' + esc(avatarOf(sp)) + '" alt="">' +
-        '<div class="sess-main"><div class="sess-title">' + esc(s.title) + "</div>" +
-        '<div class="sess-sub">' + esc(sub) + "</div></div>" +
-        '<button class="sess-del" type="button" data-del="' + s.id + '" aria-label="删除对话">' +
-        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>' +
-        "</button></div>";
+      html += sessRow(s);
     }
+
     list.innerHTML = html;
+    updateBulkBar();
   }
 
   /* ==================================================================
@@ -1376,6 +1482,427 @@
     Store.save();
   }
 
+  /* ==================================================================
+     收藏
+     ================================================================== */
+  function favKey(sessionId, turnId, side, editIndex, replyIndex) {
+    return [sessionId, turnId, side, editIndex,
+      (replyIndex === null || replyIndex === undefined) ? "-" : replyIndex].join("|");
+  }
+
+  function isFav(sessionId, turnId, side, editIndex, replyIndex) {
+    if (!sessionId) return false;
+    var k = favKey(sessionId, turnId, side, editIndex, replyIndex);
+    var list = state.favorites || [];
+    for (var i = 0; i < list.length; i++) {
+      if (favKey(list[i].sessionId, list[i].turnId, list[i].side, list[i].editIndex, list[i].replyIndex) === k) return true;
+    }
+    return false;
+  }
+
+  function toggleFav(turnId, side, editIndex, replyIndex) {
+    var s = getSession();
+    if (!s) return false;
+
+    var turn = null;
+    for (var i = 0; i < s.messages.length; i++) {
+      if (s.messages[i].id === turnId) { turn = s.messages[i]; break; }
+    }
+    if (!turn) return false;
+
+    var edit = turn.edits[editIndex] || turn.edits[0];
+    var text = side === "user"
+      ? (edit.text || "")
+      : ((edit.replies[replyIndex] || {}).content || "");
+    if (!text) { toast("这条没有内容，不能收藏"); return false; }
+
+    var list = state.favorites || (state.favorites = []);
+    var k = favKey(s.id, turnId, side, editIndex, replyIndex);
+
+    for (var j = 0; j < list.length; j++) {
+      if (favKey(list[j].sessionId, list[j].turnId, list[j].side, list[j].editIndex, list[j].replyIndex) === k) {
+        list.splice(j, 1);
+        Store.save();
+        return false;
+      }
+    }
+
+    list.unshift({
+      id: Store.uid("f"),
+      sessionId: s.id,
+      turnId: turnId,
+      side: side,
+      editIndex: editIndex,
+      replyIndex: side === "user" ? null : replyIndex,
+      preview: String(text).slice(0, 140),
+      at: Date.now()
+    });
+    Store.save();
+    return true;
+  }
+
+  /* ==================================================================
+     搜索
+     ================================================================== */
+  var searchTimer = null;
+  var searchHits = [];
+  var searchShown = 0;
+  var SEARCH_PAGE = 30;
+
+  /* dir: "left" = 向左飞出（跳走了）；其它 = 向右飞出（退回抽屉） */
+  function slideOut(el, dir) {
+    el.classList.remove("open");
+    if (dir === "left") {
+      el.style.transform = "translateX(-100%)";
+      setTimeout(function () { el.style.transform = ""; }, 360);
+    } else {
+      el.style.transform = "";
+    }
+    el.setAttribute("aria-hidden", "true");
+  }
+
+  /* fromBack: true = 从左侧飞回来（用户点返回） */
+  function slideIn(el, fromBack) {
+    // 先「关掉过渡」把元素摆到起始位置，再恢复过渡滑入，
+    // 否则移除 open 时过渡已经启动，后续设置会被合并掉。
+    el.style.transition = "none";
+    el.classList.remove("open");
+    el.style.transform = fromBack ? "translateX(-100%)" : "translateX(100%)";
+
+    void el.offsetWidth;   // 强制应用起始状态
+
+    el.style.transition = "";
+    el.style.transform = "";
+    el.classList.add("open");
+    el.setAttribute("aria-hidden", "false");
+  }
+
+  function openSearch(fromBack) {
+    closeDrawer();
+    slideIn($("searchPage"), !!fromBack);
+    setTimeout(function () { try { $("searchInput").focus(); } catch (e) { } }, 280);
+  }
+
+  function closeSearch(dir) {
+    slideOut($("searchPage"), dir);
+  }
+
+  function makeHit(s, turn, side, ei, ri, text, visible) {
+    var ed = turn.edits[ei];
+    var active = !!visible[turn.id] && turn.activeEdit === ei &&
+      (side === "user" || (ed && ed.activeReply === ri));
+
+    return {
+      sessionId: s.id,
+      sessionTitle: s.title,
+      turnId: turn.id,
+      side: side,
+      editIndex: ei,
+      replyIndex: ri,
+      text: text,
+      visible: active,
+      think: false
+    };
+  }
+
+  function doSearch() {
+    var kw = $("searchInput").value.trim();
+    $("btnSearchClear").hidden = !kw;
+
+    if (!kw) { searchHits = []; renderSearch(true); return; }
+
+    var lower = kw.toLowerCase();
+    var hits = [];
+    var sessions = state.sessions || [];
+
+    for (var i = 0; i < sessions.length; i++) {
+      var s = sessions[i];
+      var visible = {};
+      Store.visibleTurns(s).forEach(function (t) { visible[t.id] = true; });
+
+      for (var ti = 0; ti < s.messages.length; ti++) {
+        var turn = s.messages[ti];
+        if (!turn || !turn.edits) continue;
+
+        for (var ei = 0; ei < turn.edits.length; ei++) {
+          var ed = turn.edits[ei];
+          if (!ed) continue;
+
+          var ut = String(ed.text || "");
+          if (ut && ut.toLowerCase().indexOf(lower) !== -1) {
+            hits.push(makeHit(s, turn, "user", ei, null, ut, visible));
+          }
+
+          var reps = ed.replies || [];
+          for (var ri = 0; ri < reps.length; ri++) {
+            var content = String(reps[ri].content || "");
+            var reason = String(reps[ri].reasoning || "");
+
+            if (content && content.toLowerCase().indexOf(lower) !== -1) {
+              hits.push(makeHit(s, turn, "ai", ei, ri, content, visible));
+            } else if (reason && reason.toLowerCase().indexOf(lower) !== -1) {
+              var h = makeHit(s, turn, "ai", ei, ri, reason, visible);
+              h.think = true;
+              hits.push(h);
+            }
+          }
+        }
+      }
+    }
+
+    searchHits = hits;
+    renderSearch(true);
+  }
+
+  function highlight(text, kw) {
+    var lower = text.toLowerCase();
+    var k = kw.toLowerCase();
+    var out = "";
+    var idx = 0;
+    var at;
+    var guard = 0;
+
+    while ((at = lower.indexOf(k, idx)) !== -1 && guard++ < 60) {
+      out += esc(text.slice(idx, at));
+      out += "<mark>" + esc(text.slice(at, at + k.length)) + "</mark>";
+      idx = at + k.length;
+    }
+    out += esc(text.slice(idx));
+    return out;
+  }
+
+  function hitNode(hit, kw) {
+    var b = document.createElement("button");
+    b.className = "search-hit";
+    b.type = "button";
+    b.setAttribute("data-hit", hit.sessionId + "\u0001" + hit.turnId + "\u0001" +
+      hit.side + "\u0001" + hit.editIndex + "\u0001" + (hit.replyIndex === null ? "-" : hit.replyIndex));
+
+    var badges = '<span class="hit-badge' + (hit.side === "ai" ? " ai" : "") + '">' +
+      (hit.side === "ai" ? (hit.think ? "思考" : "回复") : "输入") + "</span>";
+    if (!hit.visible) badges += '<span class="hit-badge branch">其他分支</span>';
+
+    var lower = hit.text.toLowerCase();
+    var at2 = lower.indexOf(kw.toLowerCase());
+    var start = Math.max(0, at2 - 40);
+    var snippet = hit.text.slice(start, start + 170);
+
+    b.innerHTML =
+      '<div class="hit-top">' + badges +
+      '<span class="hit-title">' + esc(hit.sessionTitle || "") + "</span></div>" +
+      '<div class="hit-text">' + (start > 0 ? "…" : "") + highlight(snippet, kw) + "</div>";
+
+    return b;
+  }
+
+  function renderSearch(reset) {
+    var list = $("searchList");
+    var kw = $("searchInput").value.trim();
+
+    if (reset) { list.innerHTML = ""; searchShown = 0; }
+
+    if (!searchHits.length) {
+      $("searchHint").hidden = false;
+      $("searchHint").textContent = kw
+        ? "没有找到包含「" + kw + "」的内容"
+        : "输入关键词，会在所有对话的输入、思考和回复里查找";
+      $("searchMoreWrap").hidden = true;
+      return;
+    }
+
+    $("searchHint").hidden = false;
+    $("searchHint").textContent = "共 " + searchHits.length + " 条结果";
+
+    var end = Math.min(searchHits.length, searchShown + SEARCH_PAGE);
+    var frag = document.createDocumentFragment();
+    for (var i = searchShown; i < end; i++) frag.appendChild(hitNode(searchHits[i], kw));
+    list.appendChild(frag);
+    searchShown = end;
+
+    $("searchMoreWrap").hidden = searchShown >= searchHits.length;
+    $("btnSearchMore").textContent = "加载更多（还有 " + (searchHits.length - searchShown) + " 条）";
+  }
+
+  /* ==================================================================
+     跳转与返回
+     ================================================================== */
+  var returnTo = null;
+
+  function updateMenuButton() {
+    var btn = $("btnMenu");
+    if (!btn) return;
+    if (returnTo) {
+      btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
+      btn.setAttribute("aria-label", "返回");
+    } else {
+      btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+      btn.setAttribute("aria-label", "对话列表");
+    }
+  }
+
+  function ensureTurnRendered(turnId) {
+    var s = getSession();
+    if (!s) return;
+
+    var vis = Store.visibleTurns(s);
+    var pos = -1;
+    for (var i = 0; i < vis.length; i++) {
+      if (vis[i].id === turnId) { pos = i; break; }
+    }
+    if (pos < 0) return;
+
+    // 已经在当前窗口里就不用动
+    if (pos >= viewStart && pos < viewEnd) return;
+
+    // 否则直接渲染这一条「附近」的一段，而不是从末尾往上堆
+    var start = Math.max(0, pos - Math.floor(PAGE_SIZE / 2));
+    var end = Math.min(vis.length, start + PAGE_SIZE);
+    if (end - start < PAGE_SIZE) start = Math.max(0, end - PAGE_SIZE);
+
+    renderWindow(start, end);
+  }
+
+  function jumpToTarget(info, backTo) {
+    var s = null;
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === info.sessionId) { s = state.sessions[i]; break; }
+    }
+    if (!s) { toast("找不到这条对话"); return; }
+
+    var turn = null;
+    for (var j = 0; j < s.messages.length; j++) {
+      if (s.messages[j].id === info.turnId) { turn = s.messages[j]; break; }
+    }
+    if (!turn) { toast("这条消息已经不在了"); return; }
+
+    var switched = false;
+
+    var targetEi = parseInt(info.editIndex, 10) || 0;
+    if (turn.activeEdit !== targetEi && turn.edits[targetEi]) {
+      turn.activeEdit = targetEi;
+      switched = true;
+    }
+
+    var ed = turn.edits[turn.activeEdit];
+    if (info.side === "ai" && ed && info.replyIndex !== null &&
+        info.replyIndex !== undefined && ed.replies[info.replyIndex] &&
+        ed.activeReply !== info.replyIndex) {
+      ed.activeReply = info.replyIndex;
+      switched = true;
+    }
+
+    state.activeId = s.id;
+    returnTo = backTo || null;
+    updateMenuButton();
+
+    // 先把目标那段渲染好，再让搜索页飞走，避免露出空背景
+    renderMessages(turn.id);
+    renderTopbar();
+    renderDrawer();
+    Store.save();
+
+    closeSearch("left");
+    closeFavs("left");
+    closeDrawer();
+
+    setTimeout(function () {
+      var el = document.querySelector('.turn-block[data-turn="' + turn.id + '"]');
+      if (el) {
+        try { el.scrollIntoView({ block: "center" }); } catch (e) { }
+        el.classList.add("flash");
+        setTimeout(function () { el.classList.remove("flash"); }, 1800);
+      } else {
+        toast("这条消息比较早，往上滑加载更多就能看到", 2600);
+      }
+    }, 160);
+
+    if (switched) {
+      toast("已切换到这条消息所在的版本，原来的分支可以用箭头切回", 3400);
+    }
+  }
+
+  /* ==================================================================
+     收藏夹页面
+     ================================================================== */
+  var favShown = 0;
+  var FAV_PAGE = 30;
+
+  function openFavs(fromBack) {
+    closeDrawer();
+    slideIn($("favPage"), !!fromBack);
+    renderFavs(true);
+  }
+
+  function closeFavs(dir) {
+    slideOut($("favPage"), dir);
+  }
+
+  function favNode(f) {
+    var s = null;
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === f.sessionId) { s = state.sessions[i]; break; }
+    }
+
+    var b = document.createElement("button");
+    b.className = "search-hit";
+    b.type = "button";
+    b.setAttribute("data-fav", f.id);
+
+    var badge = '<span class="hit-badge' + (f.side === "ai" ? " ai" : "") + '">' +
+      (f.side === "ai" ? "回复" : "输入") + "</span>";
+    if (!s) badge += '<span class="hit-badge branch">对话已删除</span>';
+
+    b.innerHTML =
+      '<div class="hit-top">' + badge +
+      '<span class="hit-title">' + esc(s ? s.title : "(已删除)") + "</span>" +
+      '<span style="flex:none">' + esc(fmtDay(f.at)) + "</span></div>" +
+      '<div class="hit-text">' + esc(f.preview) + "</div>";
+
+    return b;
+  }
+
+  function renderFavs(reset) {
+    var list = $("favList");
+    var favs = (state.favorites || []).slice();
+
+    if (reset) { list.innerHTML = ""; favShown = 0; }
+
+    if (!favs.length) {
+      $("favHint").hidden = false;
+      $("favHint").textContent = "还没有收藏。点消息下面的星星，就能把输入或回复收藏到这里";
+      $("favMoreWrap").hidden = true;
+      return;
+    }
+
+    $("favHint").hidden = false;
+    $("favHint").textContent = "共 " + favs.length + " 条收藏";
+
+    var end = Math.min(favs.length, favShown + FAV_PAGE);
+    var frag = document.createDocumentFragment();
+    for (var i = favShown; i < end; i++) frag.appendChild(favNode(favs[i]));
+    list.appendChild(frag);
+    favShown = end;
+
+    $("favMoreWrap").hidden = favShown >= favs.length;
+    $("btnFavMore").textContent = "加载更多（还有 " + (favs.length - favShown) + " 条）";
+  }
+
+  /* ==================================================================
+     置顶
+     ================================================================== */
+  function togglePin(sid) {
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sid) {
+        var s = state.sessions[i];
+        s.pinned = !s.pinned;
+        Store.save();
+        renderDrawer();
+        toast(s.pinned ? "已置顶这条对话" : "已取消置顶", 1600);
+        return;
+      }
+    }
+  }
+
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       return navigator.clipboard.writeText(text);
@@ -1434,13 +1961,27 @@
     }
   }
 
-  function handleAction(act, turnId, side, replyId) {
+  function handleAction(act, turnId, side, replyId, editIndexAttr, replyIndexAttr) {
     var f = findTurn(turnId);
     if (!f) return;
 
     var turn = f.turn;
     var s = f.session;
     var edit = turn.edits[turn.activeEdit] || turn.edits[0];
+
+    // 收藏 / 取消收藏
+    if (act === "star") {
+      var ei = editIndexAttr === null || editIndexAttr === undefined || editIndexAttr === ""
+        ? turn.activeEdit : (parseInt(editIndexAttr, 10) || 0);
+      var ri = replyIndexAttr === null || replyIndexAttr === undefined || replyIndexAttr === ""
+        ? null : (parseInt(replyIndexAttr, 10) || 0);
+      if (side === "ai" && ri === null) ri = (turn.edits[ei] || {}).activeReply || 0;
+
+      var on = toggleFav(turn.id, side === "ai" ? "ai" : "user", ei, ri);
+      refreshTurn(turn);
+      toast(on ? "已收藏" : "已取消收藏", 1400);
+      return;
+    }
     var reply = replyId ? findReply(turn, replyId)
       : (edit.replies[edit.activeReply] || edit.replies[edit.replies.length - 1]);
 
@@ -1687,7 +2228,18 @@
      ================================================================== */
   function bindEvents() {
     // 顶栏
-    $("btnMenu").addEventListener("click", openDrawer);
+    // 菜单键：从搜索/收藏跳转过来时，先当「返回」用
+    $("btnMenu").addEventListener("click", function () {
+      if (returnTo) {
+        var back = returnTo;
+        returnTo = null;
+        updateMenuButton();
+        if (back === "search") openSearch(true);
+        else if (back === "favs") openFavs(true);
+        return;
+      }
+      openDrawer();
+    });
     $("btnDrawerClose").addEventListener("click", closeDrawer);
     $("scrim").addEventListener("click", closeDrawer);
     $("btnNew").addEventListener("click", function () {
@@ -1917,9 +2469,26 @@
     $("btnCheckUpdate").addEventListener("click", checkUpdate);
 
     // 抽屉
-    $("searchSessions").addEventListener("input", renderDrawer);
-
     $("sessionList").addEventListener("click", function (e) {
+      // 批量模式下：点一下就是勾选 / 取消，不切换对话
+      if (bulkMode) {
+        var row = e.target.closest ? e.target.closest("[data-sid]") : null;
+        if (row) {
+          var sid0 = row.getAttribute("data-sid");
+          bulkSelected[sid0] = !bulkSelected[sid0];
+          if (!bulkSelected[sid0]) delete bulkSelected[sid0];
+          renderDrawer();
+        }
+        return;
+      }
+
+      var pinBtn = e.target.closest ? e.target.closest("[data-pin]") : null;
+      if (pinBtn) {
+        e.stopPropagation();
+        togglePin(pinBtn.getAttribute("data-pin"));
+        return;
+      }
+
       var delBtn = e.target.closest ? e.target.closest("[data-del]") : null;
       if (delBtn) {
         e.stopPropagation();
@@ -2132,9 +2701,13 @@
 
     // 消息区事件委托
     $messages.addEventListener("click", function (e) {
-      // 长对话：加载更早的消息
-      var moreBtn = e.target.closest ? e.target.closest("#loadMoreBtn") : null;
-      if (moreBtn) { loadOlder(); return; }
+      // 长对话分页：加载更早 / 更晚
+      var moreBtn = e.target.closest ? e.target.closest("[data-more]") : null;
+      if (moreBtn) {
+        if (moreBtn.getAttribute("data-more") === "earlier") loadOlder();
+        else loadNewer();
+        return;
+      }
 
       var actBtn = e.target.closest ? e.target.closest("[data-act]") : null;
       if (actBtn) {
@@ -2142,7 +2715,9 @@
           actBtn.getAttribute("data-act"),
           actBtn.getAttribute("data-turn"),
           actBtn.getAttribute("data-side"),
-          actBtn.getAttribute("data-reply")
+          actBtn.getAttribute("data-reply"),
+          actBtn.getAttribute("data-ei"),
+          actBtn.getAttribute("data-ri")
         );
         return;
       }
@@ -2195,6 +2770,106 @@
       var setup = e.target.closest ? e.target.closest("#setupKey") : null;
       if (setup) openSettings();
     });
+
+    // ---------- 搜索 / 收藏 ----------
+    // ---------- 批量管理 ----------
+    $("btnBulk").addEventListener("click", function () { setBulkMode(!bulkMode); });
+
+    $("bulkBar").addEventListener("click", function (e) {
+      var b = e.target.closest ? e.target.closest("[data-bulk]") : null;
+      if (!b) return;
+      var action = b.getAttribute("data-bulk");
+      var ids = Object.keys(bulkSelected).filter(function (k) { return bulkSelected[k]; });
+      if (!ids.length) return;
+
+      if (action === "pin") {
+        ids.forEach(function (sid) {
+          for (var i = 0; i < state.sessions.length; i++) {
+            if (state.sessions[i].id === sid) state.sessions[i].pinned = true;
+          }
+        });
+        Store.save();
+        setBulkMode(false);
+        toast("已置顶 " + ids.length + " 条对话", 1800);
+      } else if (action === "del") {
+        confirmDialog("删除选中的对话？", "共 " + ids.length + " 条，删除后无法恢复。", "删除")
+          .then(function (ok) {
+            if (!ok) return;
+            state.sessions = state.sessions.filter(function (x) { return ids.indexOf(x.id) === -1; });
+            if (ids.indexOf(state.activeId) !== -1) {
+              state.activeId = state.sessions.length ? state.sessions[0].id : null;
+            }
+            Store.save();
+            setBulkMode(false);
+            renderMessages();
+            renderTopbar();
+            toast("已删除 " + ids.length + " 条对话", 1800);
+          });
+      }
+    });
+
+    $("btnSearchOpen").addEventListener("click", function () { openSearch(false); });
+    $("btnSearchCancel").addEventListener("click", function () {
+      closeSearch();
+      $("searchInput").value = "";
+      $("btnSearchClear").hidden = true;
+      // 返回的是对话列表，不是聊天界面
+      openDrawer();
+    });
+    $("btnSearchClear").addEventListener("click", function () {
+      $("searchInput").value = "";
+      $("btnSearchClear").hidden = true;
+      doSearch();
+      try { $("searchInput").focus(); } catch (e) { }
+    });
+    $("searchInput").addEventListener("input", function () {
+      var self = this;
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(function () { searchTimer = null; doSearch(); }, 260);
+    });
+    $("btnSearchMore").addEventListener("click", function () { renderSearch(false); });
+
+    $("searchList").addEventListener("click", function (e) {
+      var el = e.target.closest ? e.target.closest("[data-hit]") : null;
+      if (!el) return;
+      var parts = String(el.getAttribute("data-hit")).split("\u0001");
+      jumpToTarget({
+        sessionId: parts[0],
+        turnId: parts[1],
+        side: parts[2],
+        editIndex: parseInt(parts[3], 10) || 0,
+        replyIndex: parts[4] === "-" ? null : (parseInt(parts[4], 10) || 0)
+      }, "search");
+    });
+
+    $("btnFavOpen").addEventListener("click", function () { openFavs(false); });
+    $("btnFavClose").addEventListener("click", function () {
+      closeFavs();
+      openDrawer();
+    });
+    $("btnFavMore").addEventListener("click", function () { renderFavs(false); });
+
+    $("favList").addEventListener("click", function (e) {
+      var el = e.target.closest ? e.target.closest("[data-fav]") : null;
+      if (!el) return;
+      var fid = el.getAttribute("data-fav");
+      var list = state.favorites || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === fid) {
+          jumpToTarget({
+            sessionId: list[i].sessionId,
+            turnId: list[i].turnId,
+            side: list[i].side,
+            editIndex: list[i].editIndex,
+            replyIndex: list[i].replyIndex
+          }, "favs");
+          return;
+        }
+      }
+    });
+
+    // ---------- 返回后刷新菜单图标 ----------
+    updateMenuButton();
 
     // 滚动
     $chat.addEventListener("scroll", onScroll, { passive: true });
