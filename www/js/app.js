@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.18.2";
+  var AppVersion = "1.20.3";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -330,7 +330,8 @@
       chat: {
         thinking: !!dc.thinking,
         webSearch: !!dc.webSearch,
-        model: ""
+        // 新对话继承设置里的「默认模型」（以前写死空串，导致永远走 flash）
+        model: settings.model || "deepseek-flash"
       },
       background: "",
       messages: []
@@ -431,6 +432,9 @@
     var rate = total > 0 ? Math.round((c.hit || 0) / total * 100) : 0;
 
     var html = '<div class="usage-card" data-for="' + msg.id + '" hidden>';
+    if (msg.model) {
+      html += '<div class="usage-row"><span>模型</span><b>' + esc(msg.model) + "</b></div>";
+    }
     html += '<div class="usage-row"><span>输入</span><b>' + fmtNum(total) + " tokens</b></div>";
     // 缓存命中始终显示（为 0 时也显示 0%），避免看起来像功能坏了
     html += '<div class="usage-row dim"><span>其中缓存命中</span><b>' +
@@ -765,7 +769,7 @@
 
   function modelLabel(s) {
     var chat = (s && s.chat) || {};
-    var model = API.modelOf(s);
+    var model = API.modelOf(s, settings);
     if (model === "deepseek-v4-pro") return "V4 Pro";
     if (chat.thinking && chat.webSearch) return "思考 + 搜索";
     if (chat.thinking) return "深度思考";
@@ -1100,7 +1104,7 @@
       files: atts.filter(function (a) { return a.type === "file"; }).map(function (a) { return { name: a.name, text: a.text }; }),
       replies: [{
         id: Store.uid("r"), content: "", reasoning: "",
-        model: API.modelOf(s), createdAt: Date.now()
+        model: API.modelOf(s, settings), createdAt: Date.now()
       }],
       activeReply: 0
     });
@@ -1120,6 +1124,268 @@
     startGeneration(s, turn.id);
     snapToBottom();
   }
+
+  /* ==================================================================
+     语音输入：长按输入框录音，松手转成文字
+     ================================================================== */
+  var voiceState = {
+    media: null,
+    rec: null,
+    chunks: [],
+    holding: false,
+    busy: false
+  };
+
+  function voiceSupported() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia &&
+      typeof MediaRecorder !== "undefined");
+  }
+
+  function showVoiceBar(text) {
+    var bar = $("voiceBar");
+    if (!bar) return;
+    bar.hidden = !text;
+    var t = $("voiceText");
+    if (t) t.textContent = text || "";
+  }
+
+  function stopVoiceTracks() {
+    if (voiceState.media) {
+      try {
+        voiceState.media.getTracks().forEach(function (tr) { tr.stop(); });
+      } catch (e) { }
+      voiceState.media = null;
+    }
+  }
+
+
+  /* 把录音（WebM/Ogg/任意格式）解码成 16-bit 单声道 PCM WAV。
+     ASR 只接受 16-bit PCM WAV 或 Ogg Opus，而安卓 WebView 的 MediaRecorder
+     通常只能输出 WebM，所以必须先自己转一道。 */
+  function encodeWavFromBuffer(audioBuf, targetRate) {
+    var rate = targetRate || 16000;
+    var src = audioBuf.getChannelData(0);
+    var srcRate = audioBuf.sampleRate;
+    var ratio = srcRate / rate;
+    var len = Math.floor(src.length / ratio);
+    if (len < 1) len = 1;
+
+    var samples = new Int16Array(len);
+    for (var i = 0; i < len; i++) {
+      var pos = i * ratio;
+      var i0 = Math.floor(pos);
+      var i1 = i0 + 1 < src.length ? i0 + 1 : i0;
+      var frac = pos - i0;
+      var v = src[i0] * (1 - frac) + src[i1] * frac;
+      if (v > 1) v = 1;
+      if (v < -1) v = -1;
+      samples[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+    }
+
+    var buffer = new ArrayBuffer(44 + samples.length * 2);
+    var view = new DataView(buffer);
+
+    function writeStr(off, str) {
+      for (var k = 0; k < str.length; k++) view.setUint8(off + k, str.charCodeAt(k));
+    }
+
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);              // PCM
+    view.setUint16(22, 1, true);              // 单声道
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);       // byte rate
+    view.setUint16(32, 2, true);              // block align
+    view.setUint16(34, 16, true);             // 16 bit
+    writeStr(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+
+    new Int16Array(buffer, 44).set(samples);
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  function blobToWav(blob) {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return Promise.reject(new Error("设备不支持音频解码"));
+
+    return blob.arrayBuffer().then(function (buf) {
+      var ctx = new Ctx();
+      return ctx.decodeAudioData(buf).then(function (audioBuf) {
+        try { ctx.close(); } catch (e) { }
+        return encodeWavFromBuffer(audioBuf, 16000);
+      }, function () {
+        try { ctx.close(); } catch (e) { }
+        throw new Error("录音解码失败，请重试");
+      });
+    });
+  }
+
+  function startVoice() {
+    if (voiceState.busy) return;
+    if (!voiceSupported()) {
+      toast("这台设备不支持录音", 2600);
+      return;
+    }
+
+    voiceState.holding = true;
+    voiceState.chunks = [];
+
+    // 长按会选中文字/弹放大镜，先清掉
+    try { if (window.getSelection) window.getSelection().removeAllRanges(); } catch (e) { }
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      if (!voiceState.holding) {
+        try { stream.getTracks().forEach(function (tr) { tr.stop(); }); } catch (e) { }
+        return;
+      }
+
+      voiceState.media = stream;
+
+      var mime = "";
+      var cands = ["audio/ogg;codecs=opus", "audio/webm;codecs=opus", "audio/webm"];
+      for (var i = 0; i < cands.length; i++) {
+        try {
+          if (!MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(cands[i])) {
+            mime = cands[i];
+            break;
+          }
+        } catch (e) { }
+      }
+
+      var rec;
+      try {
+        rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      } catch (e) {
+        toast("无法启动录音", 2600);
+        stopVoiceTracks();
+        showVoiceBar("");
+        return;
+      }
+
+      voiceState.rec = rec;
+
+      rec.ondataavailable = function (ev) {
+        if (ev.data && ev.data.size) voiceState.chunks.push(ev.data);
+      };
+
+      rec.onstop = function () {
+        var type = rec.mimeType || mime || "audio/webm";
+        var blob = new Blob(voiceState.chunks, { type: type });
+        voiceState.chunks = [];
+        stopVoiceTracks();
+        showVoiceBar("");
+
+        if (blob.size < 1500) {
+          toast("没听到声音，再说一次？", 2200);
+          return;
+        }
+
+        // 安卓录出来是 WebM，ASR 不认，先转成 16-bit PCM WAV
+        showVoiceBar("正在转写…");
+        blobToWav(blob).then(function (wav) {
+          transcribeVoice(wav);
+        }).catch(function (err) {
+          showVoiceBar("");
+          toast(err && err.message ? err.message : "录音处理失败", 3000);
+        });
+      };
+
+      try {
+        rec.start();
+        showVoiceBar("松手结束 · 正在听…");
+      } catch (e) {
+        toast("录音启动失败", 2600);
+        stopVoiceTracks();
+        showVoiceBar("");
+      }
+    }).catch(function () {
+      voiceState.holding = false;
+      showVoiceBar("");
+      toast("麦克风权限被拒绝，请在系统设置里允许录音", 3400);
+    });
+  }
+
+  function stopVoice() {
+    voiceState.holding = false;
+    if (voiceState.rec && voiceState.rec.state !== "inactive") {
+      try { voiceState.rec.stop(); } catch (e) { }
+      voiceState.rec = null;
+    }
+  }
+
+  function transcribeVoice(blob) {
+    if (!settings.apiKey) {
+      toast("请先填写 API Key 才能转写", 2600);
+      return;
+    }
+    if (voiceState.busy) return;
+
+    voiceState.busy = true;
+    showVoiceBar("正在转写…");
+
+    API.asr(blob, settings).then(function (text) {
+      voiceState.busy = false;
+      showVoiceBar("");
+
+      var t = String(text || "").trim();
+      if (!t) { toast("没听清，再说一次？", 2200); return; }
+
+      var cur = $input.value;
+      $input.value = cur ? (cur + (/[\s\n]$/.test(cur) ? "" : " ") + t) : t;
+      autoResize();
+      updateSendState();
+      try { $input.focus(); } catch (e) { }
+      toast("已转成文字", 1400);
+    }).catch(function (err) {
+      voiceState.busy = false;
+      showVoiceBar("");
+      toast(err && err.message ? err.message : "转写失败", 3400);
+    });
+  }
+
+  /* 长按 520ms 开始录音，松手结束 */
+  (function bindVoiceInput() {
+    var holdTimer = null;
+
+    function begin(e) {
+      if (e && e.target && e.target !== $input) return;
+      if (holdTimer) clearTimeout(holdTimer);
+      holdTimer = setTimeout(function () {
+        holdTimer = null;
+        startVoice();
+      }, 520);
+    }
+
+    function cancelTimer() {
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    }
+
+    function end() {
+      cancelTimer();
+      if (voiceState.holding) stopVoice();
+    }
+
+    $input.addEventListener("touchstart", begin, { passive: true });
+    $input.addEventListener("touchend", end, { passive: true });
+    $input.addEventListener("touchcancel", end, { passive: true });
+    $input.addEventListener("touchmove", function () {
+      // 手指移动说明不是长按，取消计时（但已经开始录音就继续）
+      if (!voiceState.holding) cancelTimer();
+    }, { passive: true });
+
+    // 桌面端调试
+    $input.addEventListener("mousedown", begin);
+    $input.addEventListener("mouseup", end);
+    $input.addEventListener("mouseleave", end);
+
+    // 长按弹出系统菜单先拦掉
+    $input.addEventListener("contextmenu", function (e) {
+      if (voiceState.holding) e.preventDefault();
+    });
+  })();
 
   function doSend() {
     if (streaming) return;
@@ -1233,14 +1499,14 @@
         id: Store.uid("r"),
         content: "",
         reasoning: "",
-        model: API.modelOf(session),
+        model: API.modelOf(session, settings),
         createdAt: Date.now()
       };
       edit.replies.push(reply);
       edit.activeReply = edit.replies.length - 1;
     }
 
-    reply.model = API.modelOf(session);
+    reply.model = API.modelOf(session, settings);
     reply.createdAt = Date.now();
     reply.error = false;
 
@@ -1399,7 +1665,7 @@
       // 结算本次用量与费用
       if (assistant.usage && !assistant.error) {
         try {
-          assistant.cost = computeCost(assistant.model || API.modelOf(session), assistant.usage, started);
+          assistant.cost = computeCost(assistant.model || API.modelOf(session, settings), assistant.usage, started);
         } catch (e) { /* 计费失败不影响展示 */ }
       }
 
@@ -2048,7 +2314,7 @@
         id: Store.uid("r"),
         content: "",
         reasoning: "",
-        model: API.modelOf(s),
+        model: API.modelOf(s, settings),
         createdAt: Date.now()
       });
       edit.activeReply = edit.replies.length - 1;
@@ -2611,8 +2877,17 @@
       if (!b) return;
       settings.model = b.getAttribute("data-v");
       markSeg(this, settings.model);
+
+      // 同时应用到当前对话，否则用户切了模型、实际还在用旧的
+      var curModel = getSession();
+      if (curModel) {
+        curModel.chat.model = settings.model;
+        curModel.updatedAt = Date.now();
+      }
+
       Store.save();
       renderTopbar();
+      toast("已切换到 " + (settings.model === "deepseek-v4-pro" ? "v4-pro" : "flash"), 1600);
     });
 
     $("setTheme").addEventListener("click", function (e) {
@@ -3132,10 +3407,13 @@
 
   function syncComposerState() {
     var s = getSession();
-    var isFlash = API.modelOf(s) === "deepseek-flash";
+    var isFlash = API.modelOf(s, settings) === "deepseek-flash";
     var f = chatFlags();
-    $("btnThink").style.display = isFlash ? "" : "none";
-    $("btnSearch").style.display = isFlash ? "" : "none";
+    // 两个按钮始终显示：v4-pro 也支持深度思考，
+    // 只是不支持联网搜索——那种情况置灰并给提示，而不是让它凭空消失。
+    $("btnThink").style.display = "";
+    $("btnSearch").style.display = "";
+    $("btnSearch").classList.toggle("disabled", !isFlash);
     $("btnThink").setAttribute("aria-pressed", f.thinking ? "true" : "false");
     $("btnSearch").setAttribute("aria-pressed", f.webSearch ? "true" : "false");
   }
@@ -3143,7 +3421,7 @@
   function toggleChatFlag(flag) {
     var s = getSession();
     // v4-pro 不提供联网搜索，直接提示而不是静默失效
-    if (flag === "webSearch" && API.modelOf(s) === "deepseek-v4-pro") {
+    if (flag === "webSearch" && API.modelOf(s, settings) === "deepseek-v4-pro") {
       toast("v4-pro 不支持联网搜索，要用搜索请切回 flash", 2600);
       return;
     }

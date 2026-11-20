@@ -2204,3 +2204,30 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   stroke-linecap: round; stroke-linejoin: round;
 }
 .bulk-bar button:disabled { opacity: .4; }
+
+/* 语音输入提示条 */
+.voice-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 34px;
+  font-size: 12px;
+  color: var(--accent);
+}
+.voice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: voicepulse 1s ease-in-out infinite;
+}
+@keyframes voicepulse {
+  0%, 100% { opacity: .35; transform: scale(.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+/* 当前模型不支持的开关：置灰但仍可见 */
+.pill.disabled {
+  opacity: .38;
+}

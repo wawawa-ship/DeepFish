@@ -66,11 +66,18 @@
   }
 
   /* 当前对话使用的模型 */
-  function modelOf(session) {
+  function modelOf(session, settings) {
     var s = (session && session.chat) || {};
     var m = s.model || "";
-    // 已知模型直接返回；旧的 chat / reasoner 已并入 flash，回退过去
+
+    // 会话里明确记录过模型，就用它
     if (m === "deepseek-flash" || m === "deepseek-v4-pro") return m;
+
+    // 老对话没有记录模型（chat.model 为空）→ 跟随设置里的默认模型，
+    // 否则用户切了 v4-pro 这些对话仍在偷偷用 flash。
+    var d = (settings && settings.model) || "";
+    if (d === "deepseek-v4-pro" || d === "deepseek-flash") return d;
+
     return "deepseek-flash";
   }
 
@@ -126,7 +133,7 @@
 
     var name = String(persona.name || "").trim() || "助手";
     var chat = (session && session.chat) || {};
-    var useTools = !!chat.webSearch && modelOf(session) === "deepseek-flash";
+    var useTools = !!chat.webSearch && modelOf(session, settings) === "deepseek-flash";
 
     var parts = [];
 
@@ -145,10 +152,12 @@
     }
 
     if (showClock) {
+      // 只写时分：日期由 flash 的 latest_reminder 提供，
+      // pro 不能联网、日期也没用，写进 system 只会白白让前缀失效。
       parts.push("");
       parts.push("【当前时间】");
-      parts.push("现在真实的时间是 " + clockText() + "。");
-      parts.push("请以这个时间为准，不要假设现在还是你训练数据里的年份或时刻。");
+      parts.push("现在是 " + clockTimeOnly() + "。");
+      parts.push("请以此为准，不要假设现在还是你训练数据里的时刻。");
     }
 
     parts.push("");
@@ -236,6 +245,12 @@
       " " + days[d.getDay()] + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
   }
 
+  /* 只要时分，例如 20:37 */
+  function clockTimeOnly() {
+    var d = new Date();
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
   /* 组装发送给 API 的消息（含角色设定与上下文裁剪） */
   function buildMessages(session, settings) {
     var out = [];
@@ -243,7 +258,7 @@
     if (sys) out.push({ role: "system", content: sys });
 
     var chat = session.chat || {};
-    var useTools = !!chat.webSearch && modelOf(session) === "deepseek-flash";
+    var useTools = !!chat.webSearch && modelOf(session, settings) === "deepseek-flash";
 
     // 把「回合」展开成 用户输入 + 当前选中回复 的序列（只取当前分支可见的）
     var flat = [];
@@ -283,14 +298,18 @@
     if (session) session.ctxStart = picked.start;
     var slice = picked.list;
 
-    // 日期提醒必须紧跟最后一条用户消息
+    // 日期提醒必须紧跟最后一条用户消息。
+    // 注意：latest_reminder 只有 deepseek-flash 支持，
+    // v4-pro 带上会直接 400（"unavailable for model deepseek-v4-pro"）。
+    var allowReminder = modelOf(session, settings) === "deepseek-flash";
+
     var lastUserIdx = -1;
     for (var k = slice.length - 1; k >= 0; k--) {
       if (slice[k].role === "user") { lastUserIdx = k; break; }
     }
 
     for (var i = 0; i < slice.length; i++) {
-      if (i === lastUserIdx) {
+      if (allowReminder && i === lastUserIdx) {
         out.push({ role: "latest_reminder", content: latestReminder() });
       }
       out.push(messagePayload(slice[i], useTools));
@@ -300,7 +319,7 @@
 
   function buildBody(settings, session, messages, stream) {
     var chat = (session && session.chat) || {};
-    var model = modelOf(session);
+    var model = modelOf(session, settings);
     var isFlash = model === "deepseek-flash";
     var isPro = model === "deepseek-v4-pro";
 
@@ -491,6 +510,28 @@
     });
   }
 
+
+  /* ---------------- 语音识别（ASR） ---------------- */
+  function asr(blob, settings) {
+    var url = endpoint(settings.baseUrl, "/v1/tools/asr");
+    var fd = new FormData();
+    var name = /ogg/i.test(blob.type) ? "voice.ogg" : "voice.wav";
+    fd.append("file", blob, name);
+
+    return fetch(url, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + String(settings.apiKey || "").trim() },
+      body: fd
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (t) { throw makeApiError(res.status, t); });
+      }
+      return res.json();
+    }).then(function (j) {
+      return String(j.text || "");
+    });
+  }
+
   /* ---------------- 一次性补全（非流式）：后台整理记忆用 ---------------- */
   function complete(settings, messages, maxTokens) {
     var url = endpoint(settings.baseUrl, "/chat/completions");
@@ -571,6 +612,7 @@
   global.API = {
     chat: chat,
     complete: complete,
+    asr: asr,
     tts: tts,
     testConnection: testConnection,
     buildMessages: buildMessages,
