@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.20.3";
+  var AppVersion = "1.20.6";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -980,9 +980,21 @@
     return $chat.scrollHeight - $chat.scrollTop - $chat.clientHeight < 120;
   }
 
-  function scrollToBottom(smooth) {
+  /* 记录「这次滚动是程序滚的」，避免把它误判成用户操作 */
+  var progScrollAt = 0;
+  var userTouching = false;
+
+  function markProgScroll() {
+    progScrollAt = Date.now();
+  }
+
+  function scrollToBottom(smooth, force) {
+    // 手指按在消息区时，绝不抢滚动（除非调用方明确要求强制）
+    if (!force && userTouching) return;
+
     if (smooth === false) {
       $chat.scrollTop = $chat.scrollHeight;
+      markProgScroll();
       return;
     }
     try {
@@ -990,12 +1002,16 @@
     } catch (e) {
       $chat.scrollTop = $chat.scrollHeight;
     }
+    markProgScroll();
   }
 
   /* 进对话 / 切换对话时直接停在最新一条，不用手动往下滑 */
   function snapToBottom() {
     function go() {
-      if (autoScroll) $chat.scrollTop = $chat.scrollHeight;
+      if (!autoScroll) return;
+      if (userTouching) return;
+      $chat.scrollTop = $chat.scrollHeight;
+      markProgScroll();
     }
     go();
     requestAnimationFrame(go);
@@ -1010,6 +1026,16 @@
       scrollRaf = null;
       var nb = nearBottom();
       $("btnScrollBottom").classList.toggle("hidden", nb);
+
+      // 用户手指在屏幕上滑动 → 以他为准，立刻摆脱自动滚动
+      if (userTouching) {
+        autoScroll = nb;
+        return;
+      }
+
+      // 刚才是程序滚的，不能拿它反过来覆盖用户的选择
+      if (Date.now() - progScrollAt < 150) return;
+
       autoScroll = nb;
     });
   }
@@ -1546,11 +1572,14 @@
 
     function scheduleScroll() {
       if (!autoScroll) return;
+      if (userTouching) return;      // 用户正在滑，先让他滑
       if (rafPending) return;
       rafPending = true;
       requestAnimationFrame(function () {
         rafPending = false;
+        if (!autoScroll || userTouching) return;
         $chat.scrollTop = $chat.scrollHeight;
+        markProgScroll();
       });
     }
 
@@ -3149,6 +3178,29 @@
     // 滚动
     $chat.addEventListener("scroll", onScroll, { passive: true });
 
+    // 手指按在消息区时，滚动就是用户意愿
+    $chat.addEventListener("touchstart", function () {
+      userTouching = true;
+    }, { passive: true });
+
+    $chat.addEventListener("touchmove", function () {
+      userTouching = true;
+    }, { passive: true });
+
+    $chat.addEventListener("touchend", function () {
+      setTimeout(function () { userTouching = false; }, 350);
+    }, { passive: true });
+
+    $chat.addEventListener("touchcancel", function () {
+      setTimeout(function () { userTouching = false; }, 350);
+    }, { passive: true });
+
+    // 滚轮 / 鼠标拖动（桌面调试）
+    $chat.addEventListener("wheel", function () {
+      userTouching = true;
+      setTimeout(function () { userTouching = false; }, 350);
+    }, { passive: true });
+
     // 取消「修改已发送内容」
     $("composerHint").addEventListener("click", function (e) {
       if (!editingTurnId) return;
@@ -3158,7 +3210,8 @@
     });
     $("btnScrollBottom").addEventListener("click", function () {
       autoScroll = true;
-      scrollToBottom(true);
+      userTouching = false;
+      scrollToBottom(false, true);
     });
 
     // 视口
@@ -3469,6 +3522,83 @@
     });
   }
 
+
+  /* ---------- docx 正文提取（docx 本质是 zip，正文在 word/document.xml） ---------- */
+  function bytesToUtf8(bytes) {
+    try {
+      if (window.TextDecoder) return new TextDecoder("utf-8").decode(bytes);
+    } catch (e) { }
+    var out = "";
+    for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+    try { return decodeURIComponent(escape(out)); } catch (e2) { return out; }
+  }
+
+  function decodeXmlEntities(str) {
+    return String(str)
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, "\"")
+      .replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(parseInt(n, 10)); })
+      .replace(/&amp;/g, "&");
+  }
+
+  function docxToText(file) {
+    return file.arrayBuffer().then(function (buf) {
+      return DSZip.unzipAll(buf);
+    }).then(function (entries) {
+      var raw = entries["word/document.xml"];
+      if (!raw) throw new Error("这不是有效的 docx 文件");
+
+      var xml = bytesToUtf8(raw);
+      var lines = [];
+
+      // 按段落切，每段把 <w:t> 里的文字拼起来
+      var paras = xml.split(/<\/w:p>/);
+      for (var i = 0; i < paras.length; i++) {
+        var p = paras[i];
+        // 表格单元格、换行
+        p = p.replace(/<w:tab[^>]*\/>/g, "\t").replace(/<w:br[^>]*\/>/g, "\n");
+
+        var text = "";
+        var re = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+        var m;
+        while ((m = re.exec(p)) !== null) text += m[1];
+
+        text = decodeXmlEntities(text);
+        if (text.trim()) lines.push(text);
+      }
+
+      var result = lines.join("\n").trim();
+      if (!result) throw new Error("这个 docx 里没有可读的文字");
+      return result;
+    });
+  }
+
+  /* 判断是不是二进制：前 512 字节里控制字符太多就当二进制 */
+  function looksBinary(bytes) {
+    var n = Math.min(bytes.length, 512);
+    if (!n) return false;
+
+    var bad = 0;
+    for (var i = 0; i < n; i++) {
+      var b = bytes[i];
+      if (b === 0) return true;                       // NUL 基本可以断定是二进制
+      if (b < 7 || (b > 13 && b < 32)) bad++;
+    }
+    return bad / n > 0.1;
+  }
+
+  function readTextSafe(file) {
+    return file.arrayBuffer().then(function (buf) {
+      var bytes = new Uint8Array(buf);
+      if (looksBinary(bytes)) {
+        throw new Error("「" + file.name + "」看起来是二进制文件，暂时读不了");
+      }
+      return bytesToUtf8(bytes);
+    });
+  }
+
   function addAttachments(files) {
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
@@ -3479,9 +3609,21 @@
           return { type: "image", name: f.name, dataUrl: url, text: "" };
         }).catch(function () { return null; });
       }
-      return readFileText(f).then(function (txt) {
+      if (/\.docx$/i.test(f.name)) {
+        return docxToText(f).then(function (txt) {
+          return { type: "file", name: f.name, dataUrl: "", text: String(txt).slice(0, 200000) };
+        }).catch(function (err) {
+          toast(err && err.message ? err.message : "读取 docx 失败", 2600);
+          return null;
+        });
+      }
+
+      return readTextSafe(f).then(function (txt) {
         return { type: "file", name: f.name, dataUrl: "", text: String(txt).slice(0, 200000) };
-      }).catch(function () { return null; });
+      }).catch(function (err) {
+        if (err && err.message) toast(err.message, 2800);
+        return null;
+      });
     });
 
     Promise.all(jobs).then(function (items) {
@@ -3491,7 +3633,7 @@
       });
       renderAttachments();
       if (added) toast("已添加 " + added + " 个附件", 1400);
-      else toast("这些文件类型不支持", 2000);
+      else toast("这些文件读不了，换个文本/代码文件试试", 2400);
     });
   }
 
