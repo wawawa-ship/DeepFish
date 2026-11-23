@@ -87,6 +87,8 @@
     var imgs = Array.isArray(m.images) ? m.images : [];
     var files = Array.isArray(m.files) ? m.files : [];
 
+    if (m.sendNote) text = String(text || "") + m.sendNote;
+
     if (files.length) {
       var extra = files.map(function (f) {
         return "【文件：" + (f.name || "未命名") + "】\n" + String(f.text || "").slice(0, 60000);
@@ -278,7 +280,8 @@
       flat.push({
         role: "user",
         content: text,
-        images: edit.images,
+        images: (edit.sendImages && edit.sendImages.length) ? edit.sendImages : edit.images,
+        sendNote: edit.sendNote || "",
         files: edit.files,
         createdAt: edit.createdAt
       });
@@ -308,11 +311,50 @@
       if (slice[k].role === "user") { lastUserIdx = k; break; }
     }
 
+    /* 图片预算：官方规定「单个请求 >= 15 张图时，单边上限从 8192 降到 4096」。
+       长截图本来就高，一旦触发就必然报错，所以主动只带最近 10 张，
+       更早的图片不再重复上传（内容早就聊过了，模型不缺这点信息）。 */
+    var MAX_IMAGES = 10;
+    var imgBudget = MAX_IMAGES;
+    var keepImg = {};
+
+    for (var qi = slice.length - 1; qi >= 0; qi--) {
+      var imList = slice[qi].images || [];
+      if (!imList.length) continue;
+
+      var keep = [];
+      for (var qj = imList.length - 1; qj >= 0; qj--) {
+        if (imgBudget > 0) {
+          keep.unshift(qj);
+          imgBudget--;
+        }
+      }
+      keepImg[qi] = keep;
+    }
+
+    function trimImages(idx) {
+      var msg = slice[idx];
+      var imgs = msg.images || [];
+      if (!imgs.length) return msg;
+
+      var keep = keepImg[idx] || [];
+      if (keep.length === imgs.length) return msg;
+
+      // 有图片被裁掉：复制一份，避免改动会话里真正存的数据
+      return {
+        role: msg.role,
+        content: msg.content,
+        images: keep.map(function (k) { return imgs[k]; }),
+        files: msg.files,
+        reasoning: msg.reasoning
+      };
+    }
+
     for (var i = 0; i < slice.length; i++) {
       if (allowReminder && i === lastUserIdx) {
         out.push({ role: "latest_reminder", content: latestReminder() });
       }
-      out.push(messagePayload(slice[i], useTools));
+      out.push(messagePayload(trimImages(i), useTools));
     }
     return out;
   }

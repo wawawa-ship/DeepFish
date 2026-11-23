@@ -314,6 +314,10 @@
       text: typeof e.text === "string" ? e.text : "",
       createdAt: e.createdAt || Date.now(),
       images: Array.isArray(e.images) ? e.images : [],
+      // 超长截图：界面显示原图，发送用切分图 + 只给模型看的说明
+      sendImages: Array.isArray(e.sendImages) ? e.sendImages : [],
+      sendNote: typeof e.sendNote === "string" ? e.sendNote : "",
+      imageSizes: Array.isArray(e.imageSizes) ? e.imageSizes : [],
       files: Array.isArray(e.files) ? e.files : [],
       replies: replies,
       activeReply: ai

@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.20.9";
+  var AppVersion = "1.21.2";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -458,9 +458,13 @@
     var imgs = msg.images || [];
     var files = msg.files || [];
     if (imgs.length) {
+      var sizes = msg.imageSizes || [];
       html += '<div class="msg-images">';
       for (var i = 0; i < imgs.length; i++) {
-        html += '<img src="' + esc(imgs[i]) + '" alt="">';
+        var sz = sizes[i] || {};
+        var tallCls = (sz.w && sz.h && sz.h > sz.w * 2.2) ? " tall" : "";
+        html += '<img src="' + esc(imgs[i]) + '" class="msg-img' + tallCls +
+          '" data-img="' + esc(imgs[i]) + '" alt="">';
       }
       html += "</div>";
     }
@@ -1127,6 +1131,9 @@
       text: text,
       createdAt: Date.now(),
       images: atts.filter(function (a) { return a.type === "image"; }).map(function (a) { return a.dataUrl; }),
+      sendImages: collectSendImages(atts),
+      sendNote: collectSendNote(atts),
+      imageSizes: collectImageSizes(atts),
       files: atts.filter(function (a) { return a.type === "file"; }).map(function (a) { return { name: a.name, text: a.text }; }),
       replies: [{
         id: Store.uid("r"), content: "", reasoning: "",
@@ -1490,6 +1497,9 @@
         text: text,
         createdAt: Date.now(),
         images: atts.filter(function (a) { return a.type === "image"; }).map(function (a) { return a.dataUrl; }),
+        sendImages: collectSendImages(atts),
+        sendNote: collectSendNote(atts),
+        imageSizes: collectImageSizes(atts),
         files: atts.filter(function (a) { return a.type === "file"; }).map(function (a) { return { name: a.name, text: a.text }; }),
         replies: [],
         activeReply: 0
@@ -2733,6 +2743,24 @@
     $("attachFile").addEventListener("change", function () {
       addAttachments(this.files);
     });
+    // 点消息里的图片 → 全屏查看
+    $messages.addEventListener("click", function (e) {
+      var img = e.target.closest ? e.target.closest(".msg-img") : null;
+      if (!img) return;
+      var src = img.getAttribute("data-img") || img.src;
+      if (!src) return;
+      $("imgViewerImg").src = src;
+      $("imgViewer").hidden = false;
+    });
+
+    $("imgViewerClose").addEventListener("click", function () {
+      $("imgViewer").hidden = true;
+    });
+
+    $("imgViewer").addEventListener("click", function (e) {
+      if (e.target === this) this.hidden = true;
+    });
+
     $("attachStrip").addEventListener("click", function (e) {
       var btn = e.target.closest ? e.target.closest("[data-ai]") : null;
       if (!btn) return;
@@ -3703,15 +3731,136 @@
     });
   }
 
+  /* 把图片转成附件项。超长图（>6000 高）会按长度切成多张，
+     每张最多 4000 高（远低于接口 4096/8192 的限制，保证文字清晰），
+     相邻两张重叠 30 像素，避免正好切断一行字。 */
+  function sliceImageFile(file) {
+    return new Promise(function (resolve) {
+      var reader = new FileReader();
+
+      reader.onload = function (e) {
+        var img = new Image();
+
+        img.onload = function () {
+          var w = img.width;
+          var h = img.height;
+
+          // 不算长的图：照常压缩，显示和发送用同一张
+          if (h <= 6000) {
+            compressImage(file, 1400, 0.85).then(function (url) {
+              resolve([{ type: "image", name: file.name, dataUrl: url, sendImages: [url], imgW: w, imgH: h, text: "" }]);
+            }).catch(function () { resolve([]); });
+            return;
+          }
+
+          var SEG = 4000;
+          var n = Math.min(6, Math.ceil(h / SEG));
+          var segH = Math.ceil(h / n);
+
+          // 宽度也要收一收，太宽的截图同样会超限
+          var tw = Math.min(w, 1240);
+          var scale = tw / w;
+
+          var parts = [];
+          for (var i = 0; i < n; i++) {
+            var y0 = i * segH;
+            var top = Math.max(0, y0 - (i > 0 ? 30 : 0));
+            var bot = Math.min(h, y0 + segH + (i < n - 1 ? 30 : 0));
+            var sh = bot - top;
+            if (sh <= 0) continue;
+
+            var cw = Math.max(1, Math.round(w * scale));
+            var ch = Math.max(1, Math.round(sh * scale));
+
+            var cv = document.createElement("canvas");
+            cv.width = cw;
+            cv.height = ch;
+            var cx = cv.getContext("2d");
+            cx.fillStyle = "#fff";
+            cx.fillRect(0, 0, cw, ch);
+            cx.drawImage(img, 0, top, w, sh, 0, 0, cw, ch);
+
+            try {
+              parts.push(cv.toDataURL("image/jpeg", 0.92));
+            } catch (err) { }
+          }
+
+          if (!parts.length) { resolve([]); return; }
+
+          // 显示给用户的：整张缩略图（宽 720，省空间也省存储）
+          var pw = Math.max(1, Math.round(w * (720 / w)));
+          var ph = Math.max(1, Math.round(h * (720 / w)));
+          var preview = "";
+          try {
+            var pv = document.createElement("canvas");
+            pv.width = pw;
+            pv.height = ph;
+            var pctx = pv.getContext("2d");
+            pctx.fillStyle = "#fff";
+            pctx.fillRect(0, 0, pw, ph);
+            pctx.drawImage(img, 0, 0, w, h, 0, 0, pw, ph);
+            preview = pv.toDataURL("image/jpeg", 0.86);
+          } catch (e) {
+            preview = parts[0];
+          }
+
+          var note = "\n\n【这张截图太长，已按从上到下切成 " + parts.length +
+            " 张连续的图片，请按 1 → " + parts.length + " 的顺序阅读】";
+
+          // 只生成一个附件：界面显示 preview，发送时用 parts
+          resolve([{
+            type: "image",
+            name: file.name,
+            dataUrl: preview,
+            sendImages: parts,
+            sendNote: note,
+            imgW: w,
+            imgH: h,
+            text: ""
+          }]);
+        };
+
+        img.onerror = function () { resolve([]); };
+        img.src = e.target.result;
+      };
+
+      reader.onerror = function () { resolve([]); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /* 实际发给模型的图片（超长图是切开的版本，界面只显示一整张） */
+  function collectSendImages(atts) {
+    var out = [];
+    (atts || []).forEach(function (x) {
+      if (!x || x.type !== "image") return;
+      if (x.sendImages && x.sendImages.length) out = out.concat(x.sendImages);
+      else if (x.dataUrl) out.push(x.dataUrl);
+    });
+    return out;
+  }
+
+  function collectImageSizes(atts) {
+    return (atts || []).filter(function (x) { return x && x.type === "image"; })
+      .map(function (x) { return { w: x.imgW || 0, h: x.imgH || 0 }; });
+  }
+
+  /* 只发给模型的说明文字，界面上不显示 */
+  function collectSendNote(atts) {
+    var notes = [];
+    (atts || []).forEach(function (x) {
+      if (x && x.sendNote) notes.push(x.sendNote);
+    });
+    return notes.join("");
+  }
+
   function addAttachments(files) {
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
 
     var jobs = list.map(function (f) {
       if (/^image\//.test(f.type)) {
-        return compressImage(f, 1400, 0.85).then(function (url) {
-          return { type: "image", name: f.name, dataUrl: url, text: "" };
-        }).catch(function () { return null; });
+        return sliceImageFile(f);
       }
       if (/\.docx$/i.test(f.name)) {
         return docxToText(f).then(function (txt) {
@@ -3730,10 +3879,14 @@
       });
     });
 
-    Promise.all(jobs).then(function (items) {
+    Promise.all(jobs).then(function (groups) {
       var added = 0;
-      items.forEach(function (it) {
-        if (it) { pendingAttachments.push(it); added++; }
+      groups.forEach(function (g) {
+        if (!g) return;
+        var list = Array.isArray(g) ? g : [g];
+        list.forEach(function (it) {
+          if (it) { pendingAttachments.push(it); added++; }
+        });
       });
       renderAttachments();
       if (added) toast("已添加 " + added + " 个附件", 1400);

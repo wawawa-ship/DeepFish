@@ -2231,3 +2231,51 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 .pill.disabled {
   opacity: .38;
 }
+
+/* 长截图缩略：竖条，能看出是长图；点开看全图 */
+.msg-images img.tall {
+  width: 130px;
+  height: 320px;
+  max-width: 130px;
+  max-height: 320px;
+  object-fit: cover;
+  object-position: top;
+}
+
+/* 全屏看图 */
+.img-viewer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0; left: 0;
+  z-index: 4000;
+  background: #000;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.img-viewer[hidden] { display: none !important; }
+.img-viewer img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+.img-viewer-close {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 4001;
+}
+.img-viewer-close svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}

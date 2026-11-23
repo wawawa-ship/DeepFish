@@ -1,6 +1,6 @@
 {
   "name": "deepfish",
-  "version": "1.20.9",
+  "version": "1.21.2",
   "private": true,
   "description": "DeepFish —— 可以自定义角色的 DeepSeek 手机客户端",
   "scripts": {
