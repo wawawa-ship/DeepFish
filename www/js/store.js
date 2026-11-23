@@ -645,6 +645,53 @@
     return { sessions: st.sessions.length, messages: msgCount, bytes: size };
   }
 
+
+  /* -------------------- 语音缓存 --------------------
+     key = "tts:<replyId>"，value = 音频 Blob。
+     和会话数据共用一个 kv store，用前缀区分；
+     备份导出只含 sessions，所以音频不会撑大备份文件。 */
+  var TTS_PREFIX = "tts:";
+
+  function ttsKey(replyId) {
+    return TTS_PREFIX + replyId;
+  }
+
+  function canCacheTts() {
+    return !useFallback;   // localStorage 存不下音频，兜底模式不缓存
+  }
+
+  function getTts(replyId) {
+    if (!replyId || !canCacheTts()) return Promise.resolve(null);
+    return idbGet(ttsKey(replyId)).then(function (v) { return v || null; }, function () { return null; });
+  }
+
+  function putTts(replyId, blob) {
+    if (!replyId || !blob || !canCacheTts()) return Promise.resolve(false);
+    return idbSet(ttsKey(replyId), blob).then(function () { return true; }, function () { return false; });
+  }
+
+  function delTts(replyId) {
+    if (!replyId || !canCacheTts()) return Promise.resolve();
+    return idbDel(ttsKey(replyId)).catch(function () { });
+  }
+
+  /* 清理已经没有对应回复的语音 */
+  function pruneTts(validIds) {
+    if (!canCacheTts()) return Promise.resolve(0);
+
+    var keep = {};
+    (validIds || []).forEach(function (id) { keep[ttsKey(id)] = 1; });
+
+    return idbKeys().then(function (keys) {
+      var dead = (keys || []).filter(function (k) {
+        return typeof k === "string" && k.indexOf(TTS_PREFIX) === 0 && !keep[k];
+      });
+      return Promise.all(dead.map(function (k) {
+        return idbDel(k).catch(function () { });
+      })).then(function () { return dead.length; });
+    }).catch(function () { return 0; });
+  }
+
   /* -------------------- 导出 / 导入 -------------------- */
   function buildExport(includeKey) {
     var st = clone(store.state || defaultState());
@@ -764,6 +811,10 @@
     buildExport: buildExport,
     importData: importData,
     visibleTurns: visibleTurns,
+    getTts: getTts,
+    putTts: putTts,
+    delTts: delTts,
+    pruneTts: pruneTts,
     clearAll: clearAll,
     createSnapshot: createSnapshot,
     listSnapshots: listSnapshots,

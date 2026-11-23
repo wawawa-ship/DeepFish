@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.20.6";
+  var AppVersion = "1.20.9";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -1503,6 +1503,62 @@
     startGeneration(session);
   }
 
+  /* 历史消息里可能留着旧版本压出来的超大图（>8192 像素），
+     每次发送都会被重新打包导致接口报错。发送前就地重压一遍。 */
+  function repairSessionImages(session) {
+    if (!session) return Promise.resolve(false);
+
+    var jobs = [];
+    var changed = false;
+
+    (session.messages || []).forEach(function (t) {
+      (t.edits || []).forEach(function (ed) {
+        if (!Array.isArray(ed.images)) return;
+
+        ed.images.forEach(function (url, idx) {
+          if (typeof url !== "string" || url.indexOf("data:image") !== 0) return;
+          if (url.length < 120000) return;   // 小图不可能是超大尺寸，跳过省时间
+
+          jobs.push(new Promise(function (resolve) {
+            var im = new Image();
+            im.onload = function () {
+              if (im.width <= 8000 && im.height <= 8000) { resolve(); return; }
+
+              var sc = Math.min(8000 / im.width, 8000 / im.height);
+              var cw = Math.max(1, Math.round(im.width * sc));
+              var ch = Math.max(1, Math.round(im.height * sc));
+
+              var cv = document.createElement("canvas");
+              cv.width = cw;
+              cv.height = ch;
+              var cx = cv.getContext("2d");
+              cx.fillStyle = "#fff";
+              cx.fillRect(0, 0, cw, ch);
+              cx.drawImage(im, 0, 0, cw, ch);
+
+              try {
+                ed.images[idx] = cv.toDataURL("image/jpeg", 0.9);
+                changed = true;
+              } catch (e) { }
+              resolve();
+            };
+            im.onerror = function () { resolve(); };
+            im.src = url;
+          }));
+        });
+      });
+    });
+
+    if (!jobs.length) return Promise.resolve(false);
+
+    return Promise.all(jobs).then(function () {
+      if (changed) {
+        try { Store.save(); } catch (e) { }
+      }
+      return changed;
+    });
+  }
+
   function startGeneration(session, targetTurnId) {
     var vis = Store.visibleTurns(session);
     var turn = null;
@@ -1618,6 +1674,8 @@
 
     var firstToken = true;
 
+    // 先修掉历史里超大尺寸的图片，再发请求
+    repairSessionImages(session).then(function () {
     API.chat({
       settings: settings,
       session: session,
@@ -1656,6 +1714,7 @@
       onFinish: function () {}
     }).catch(function (err) {
       finish(err);
+    });
     });
 
     function finish(err) {
@@ -2318,6 +2377,14 @@
       confirmDialog("删除这一轮对话？", "这条输入和它下面的各个版本都会一起删除。", "删除").then(function (ok) {
         if (!ok) return;
         var deadId = turn.id;
+
+        // 语音缓存跟着回复一起删
+        if (Store.delTts) {
+          (turn.edits || []).forEach(function (ed) {
+            (ed.replies || []).forEach(function (rp) { Store.delTts(rp.id); });
+          });
+        }
+
         s.messages.splice(f.index, 1);
 
         // 挂在被删消息下面的分支已经找不到父节点了，把它们挪回根分支，避免永久隐藏
@@ -2796,6 +2863,15 @@
         confirmDialog("删除对话？", "「" + target.title + "」及其中的全部消息将被删除。", "删除")
           .then(function (ok) {
             if (!ok) return;
+            // 语音缓存跟着会话一起删
+            if (Store.delTts && target.messages) {
+              target.messages.forEach(function (tt) {
+                (tt.edits || []).forEach(function (ed) {
+                  (ed.replies || []).forEach(function (rp) { Store.delTts(rp.id); });
+                });
+              });
+            }
+
             state.sessions = state.sessions.filter(function (s) { return s.id !== sid; });
             if (state.activeId === sid) state.activeId = state.sessions.length ? state.sessions[0].id : null;
             renderDrawer();
@@ -3500,9 +3576,36 @@
         var img = new Image();
         img.onload = function () {
           var w = img.width, h = img.height;
-          var scale = Math.min(1, (maxSide || 1400) / Math.max(w, h));
-          var cw = Math.max(1, Math.round(w * scale));
-          var ch = Math.max(1, Math.round(h * scale));
+          var cw, ch;
+
+          // 长截图（高度远大于宽度，例如外卖列表、聊天记录）：
+          // 不能再按「最长边」缩放，否则宽度会被压成几十像素，字全糊。
+          // 改成锁宽度、放开高度，保住文字清晰度。
+          if (h > w * 2.2) {
+            var maxW = 1240;
+            var sw = Math.min(1, maxW / w);
+            cw = Math.max(1, Math.round(w * sw));
+            ch = Math.max(1, Math.round(h * sw));
+
+            var maxH = 8000;
+            if (ch > maxH) {
+              var sh = maxH / ch;
+              cw = Math.max(1, Math.round(cw * sh));
+              ch = maxH;
+            }
+          } else {
+            var scale = Math.min(1, (maxSide || 1400) / Math.max(w, h));
+            cw = Math.max(1, Math.round(w * scale));
+            ch = Math.max(1, Math.round(h * scale));
+          }
+
+          // 官方硬限制：宽高都不能超过 8192 像素，超了会直接报错
+          var HARD = 8192;
+          if (cw > HARD || ch > HARD) {
+            var shr = Math.min(HARD / cw, HARD / ch);
+            cw = Math.max(1, Math.round(cw * shr));
+            ch = Math.max(1, Math.round(ch * shr));
+          }
           var canvas = document.createElement("canvas");
           canvas.width = cw;
           canvas.height = ch;
@@ -3511,7 +3614,8 @@
           ctx.fillRect(0, 0, cw, ch);
           ctx.drawImage(img, 0, 0, cw, ch);
           try {
-            resolve(canvas.toDataURL("image/jpeg", quality || 0.85));
+            var q = (h > w * 2.2) ? 0.92 : (quality || 0.85);
+            resolve(canvas.toDataURL("image/jpeg", q));
           } catch (err) { reject(err); }
         };
         img.onerror = reject;
@@ -3711,6 +3815,38 @@
     } catch (e) { }
   }
 
+  /* 当前所有回复的 id，用来清理没主的语音缓存 */
+  function allReplyIds() {
+    var ids = [];
+    (state.sessions || []).forEach(function (ss) {
+      (ss.messages || []).forEach(function (tt) {
+        (tt.edits || []).forEach(function (ed) {
+          (ed.replies || []).forEach(function (rp) {
+            if (rp && rp.id) ids.push(rp.id);
+          });
+        });
+      });
+    });
+    return ids;
+  }
+
+  /* 播放一段音频 Blob */
+  function playTtsBlob(blob, id) {
+    var url = URL.createObjectURL(blob);
+    var audio = new Audio(url);
+    playingAudio = audio;
+    playingId = id;
+    audio.onended = function () { stopSpeaking(); };
+    audio.onerror = function () { toast("播放失败"); stopSpeaking(); };
+    audio.play().then(function () {
+      updateSpeakButtons();
+      toast("正在朗读", 1200);
+    }).catch(function () {
+      toast("系统拦截了播放，请再点一次喇叭");
+      stopSpeaking();
+    });
+  }
+
   function speakReply(reply) {
     unlockAudio();
     if (!reply) return;
@@ -3721,25 +3857,23 @@
 
     var text = plainPreview(String(reply.content || "").slice(0, 12000));
     if (!text) { toast("这条消息没有可朗读的内容"); return; }
-    if (!settings.apiKey) { toast("请先填写 API Key"); return; }
 
-    toast("正在合成语音…", 1800);
-    API.tts(text, settings.ttsVoice || "tide", settings).then(function (blob) {
-      var url = URL.createObjectURL(blob);
-      var audio = new Audio(url);
-      playingAudio = audio;
-      playingId = id;
-      audio.onended = function () { stopSpeaking(); };
-      audio.onerror = function () { toast("播放失败"); stopSpeaking(); };
-      audio.play().then(function () {
-        updateSpeakButtons();
-        toast("正在朗读", 1200);
-      }).catch(function () {
-        toast("系统拦截了播放，请再点一次喇叭");
-        stopSpeaking();
+    // 先找缓存：合成过的直接播，不花钱也不再等
+    Store.getTts(id).then(function (cached) {
+      if (cached) {
+        playTtsBlob(cached, id);
+        return;
+      }
+
+      if (!settings.apiKey) { toast("请先填写 API Key"); return; }
+
+      toast("正在合成语音…", 1800);
+      API.tts(text, settings.ttsVoice || "tide", settings).then(function (blob) {
+        Store.putTts(id, blob);   // 存下来，下次秒播
+        playTtsBlob(blob, id);
+      }).catch(function (err) {
+        toast(err && err.message ? err.message : "朗读失败", 3200);
       });
-    }).catch(function (err) {
-      toast(err.message || "朗读失败", 3200);
     });
   }
 
@@ -4693,6 +4827,13 @@
       setupNativeBack();
       checkNotice();
       renderAttachments();
+
+      // 清掉没有对应回复的语音缓存（例如以前崩溃留下的）
+      setTimeout(function () {
+        try {
+          if (Store.pruneTts) Store.pruneTts(allReplyIds());
+        } catch (e) { }
+      }, 1500);
 
       // 启动后自检一次，防止某些设备上出现「透明遮罩」挡住点击
       setTimeout(function () {
