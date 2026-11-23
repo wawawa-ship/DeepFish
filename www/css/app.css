@@ -243,7 +243,7 @@ html[data-theme="light"] .topbar { background: rgba(255, 255, 255, .68); }
   text-align: center;
   padding: 10px 24px 50px;
   margin-top: -6vh;
-  animation: fadeUp .45s var(--ease) both;
+  animation: fadeUp .45s var(--ease);
 }
 .welcome-avatar {
   width: 96px; height: 96px;
@@ -325,7 +325,6 @@ html[data-theme="light"] .topbar { background: rgba(255, 255, 255, .68); }
 .msg {
   display: flex;
   flex-direction: column;
-  animation: fadeUp .3s var(--ease) both;
   max-width: 100%;
 }
 .msg.user { align-items: flex-end; }
@@ -354,7 +353,6 @@ html[data-theme="light"] .topbar { background: rgba(255, 255, 255, .68); }
   word-break: break-word;
   overflow-wrap: anywhere;
   position: relative;
-  animation: pop .22s var(--ease) both;
 }
 .msg.user .bubble {
   background: var(--bubble-user);
@@ -599,7 +597,7 @@ html[data-theme="light"] .md pre > code { color: #1e3a5f; }
   color: var(--text-2);
   width: 100%;
   max-width: 280px;
-  animation: fadeUp .2s var(--ease) both;
+  animation: fadeUp .2s var(--ease);
 }
 .usage-row {
   display: flex;

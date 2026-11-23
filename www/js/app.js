@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.21.2";
+  var AppVersion = "1.21.3";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
