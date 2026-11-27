@@ -3357,3 +3357,16 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   flex: 1;
   min-height: 0;
 }
+
+.dc-del {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, .3);
+  flex: none;
+}
+.dc-del svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
+.dc-head { align-items: center; }

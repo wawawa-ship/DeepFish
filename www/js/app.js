@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.25.11";
+  var AppVersion = "1.25.12";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -554,6 +554,12 @@
       html += '<div class="bubble"></div>';
     } else {
       var body = reply.content || "";
+    // 模型可能把内容全塞进思考里，正文为空；这里给个占位，别让气泡空着
+    if (!body && reply.reasoning) {
+      body = "（这条回复没有正文，内容都在思考里）";
+    } else if (!body && !reply.error) {
+      body = "（模型这次没有输出内容）";
+    }
       if (body.length > 8000) {
         html += '<div class="bubble"><div class="stream-text">' + esc(body) + "</div>" +
           '<div class="long-note">内容较长（' + fmtNum(body.length) + " 字），已用纯文本显示以保持流畅</div></div>";
@@ -586,7 +592,8 @@
 
     var edit = turn.edits[turn.activeEdit] || turn.edits[0];
     var reply = edit && (edit.replies[edit.activeReply] || edit.replies[0]);
-    if (reply && (reply.content || reply.error || (opts && opts.streaming))) {
+    // 注意：即使 reply.content 为空也要渲染，否则整条消息会“消失”
+    if (reply) {
       box.appendChild(aiNode(turn, reply, opts));
     }
     return box;
@@ -1652,22 +1659,7 @@
       var reasoning = String(res.reasoning || "").trim();
       if (!comment) { toast("他没写出东西来", 2200); return; }
 
-      // 1）写进评论区
-      if (!Array.isArray(item.comments)) item.comments = [];
-      item.comments.push({
-        text: comment,
-        at: new Date().toLocaleString("zh-CN", {
-          month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"
-        }),
-        from: persona.name || "AI",
-        avatar: avatarOf(persona),
-        sessionId: ss.id,          // 记下来源对话，渲染时动态取角色头像
-        inviteText: inviteText || "",
-        reasoning: reasoning || ""
-      });
-      Store.saveMusicIndex(disc.list);
-
-      // 2）同时作为一条真实消息写进那个对话
+      // 1）先在聊天里建好这一轮（评论要用它的 id 做联动）
       var now = Date.now();
       var turn = {
         id: Store.uid("t"),
@@ -1692,6 +1684,24 @@
         }]
       };
 
+      // 2）写进评论区，带上来源信息
+      if (!Array.isArray(item.comments)) item.comments = [];
+      item.comments.push({
+        text: comment,
+        at: new Date().toLocaleString("zh-CN", {
+          month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"
+        }),
+        from: persona.name || "AI",
+        avatar: avatarOf(persona),
+        sessionId: ss.id,     // 来源对话（渲染时动态取角色头像）
+        turnId: turn.id,      // 对应聊天里的那一轮（删消息/切分支时联动）
+        replyId: turn.edits[0].replies[0].id,
+        inviteText: inviteText || "",
+        reasoning: reasoning || ""
+      });
+      Store.saveMusicIndex(disc.list);
+
+      // 3）作为一条真实消息写进那个对话
       ss.messages.push(turn);
       ss.updatedAt = now;
       Store.save();
@@ -1777,7 +1787,9 @@
     }
 
     var html = "";
-    list.forEach(function (c) {
+    var shown = 0;
+
+    list.forEach(function (c, ci) {
       var fromName = c.from || "匿名";
       var av = c.avatar || "";
 
@@ -1788,6 +1800,16 @@
           if (state.sessions[si].id === c.sessionId) { ss = state.sessions[si]; break; }
         }
         if (ss) {
+          // 聊天里删掉了 / 切走了分支 → 这条评论也跟着不显示
+          if (c.turnId) {
+            var vis = Store.visibleTurns(ss);
+            var stillThere = false;
+            for (var vi = 0; vi < vis.length; vi++) {
+              if (vis[vi].id === c.turnId) { stillThere = true; break; }
+            }
+            if (!stillThere) return;
+          }
+
           var sp = personaOf(ss);
           fromName = sp.name || fromName;
           av = avatarOf(sp);
@@ -1795,12 +1817,16 @@
       }
 
       if (!av) av = c.mine ? profileAvatar() : "icons/avatar-256.png";
+      shown++;
 
       html += '<div class="disc-comment">' +
         '<img class="dc-avatar" src="' + esc(av) + '" alt="">' +
         '<div class="dc-body">' +
         '<div class="dc-head"><span class="dc-name">' + esc(fromName) + "</span>" +
-        '<span class="dc-time">' + esc(c.at || "") + "</span></div>";
+        '<span class="dc-time">' + esc(c.at || "") + "</span>" +
+        '<button class="dc-del" type="button" data-dc="' + ci + '" aria-label="删除">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>' +
+        "</button></div>";
 
       if (c.inviteText) {
         html += '<details class="dc-fold"><summary>邀请词</summary>' +
@@ -1815,7 +1841,8 @@
       html += '<div class="dc-text">' + esc(c.text) + "</div>" +
         "</div></div>";
     });
-    body.innerHTML = html;
+
+    body.innerHTML = html || '<div class="empty-tip">还没有评论</div>';
   }
 
   function sendDiscComment() {
@@ -3917,6 +3944,28 @@
           if (t.branch && t.branch.turnId === deadId) t.branch = null;
         });
 
+        // 如果这条消息是「邀请评论」的产物，把唱片箱里对应的评论一起删掉
+        Store.listMusic().then(function (music) {
+          var changed = false;
+          (music || []).forEach(function (it) {
+            if (!it || !Array.isArray(it.comments)) return;
+            var before = it.comments.length;
+            it.comments = it.comments.filter(function (c) {
+              return !(c && c.turnId === deadId);
+            });
+            if (it.comments.length !== before) changed = true;
+          });
+          if (changed) {
+            Store.saveMusicIndex(music);
+            if (disc.list && disc.list.length) {
+              disc.list = music;
+              if ($("discPage") && $("discPage").classList.contains("show")) {
+                renderDiscComments();
+              }
+            }
+          }
+        });
+
         s.updatedAt = Date.now();
         renderMessages();
         renderDrawer();
@@ -5024,6 +5073,23 @@
       $("discComments").hidden = true;
     });
     $("btnDiscCommentSend").addEventListener("click", sendDiscComment);
+    $("discCommentBody").addEventListener("click", function (e) {
+      var del = e.target.closest ? e.target.closest("[data-dc]") : null;
+      if (!del) return;
+      e.stopPropagation();
+
+      var item = curDisc();
+      if (!item || !item.comments) return;
+
+      var i = parseInt(del.getAttribute("data-dc"), 10);
+      if (!item.comments[i]) return;
+
+      item.comments.splice(i, 1);
+      Store.saveMusicIndex(disc.list);
+      renderDiscComments();
+      toast("评论已删除", 1200);
+    });
+
     $("btnInviteComment").addEventListener("click", openInvitePicker);
     $("btnEditProfile").addEventListener("click", openProfileEdit);
     $("btnProfileClose").addEventListener("click", function () { closeSheet("profileSheet"); });
