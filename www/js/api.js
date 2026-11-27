@@ -575,18 +575,67 @@
   }
 
   /* ---------------- 一次性补全（非流式）：后台整理记忆用 ---------------- */
-  function complete(settings, messages, maxTokens) {
+
+  /* 非流式 + 完整信息（给「邀请评论」用，需要拿到思考内容） */
+  function completeRich(settings, messages, maxTokens, opts) {
+    opts = opts || {};
     var url = endpoint(settings.baseUrl, "/chat/completions");
+    var model = opts.model === "deepseek-v4-pro" ? "deepseek-v4-pro" : "deepseek-flash";
+
+    var body = {
+      model: model,
+      messages: messages,
+      stream: false,
+      thinking: { type: opts.thinking ? "enabled" : "disabled" },
+      max_tokens: maxTokens || 800
+    };
+    if (opts.tools && model === "deepseek-flash") {
+      body.tools = [{ type: "deepseek_web_search" }];
+    }
+
     return fetch(url, {
       method: "POST",
       headers: headers(settings),
-      body: JSON.stringify({
-        model: "deepseek-flash",
-        messages: messages,
-        stream: false,
-        thinking: { type: "disabled" },
-        max_tokens: maxTokens || 800
-      })
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (t) { throw makeApiError(res.status, t); });
+      }
+      return res.json();
+    }).then(function (j) {
+      var msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
+      return {
+        text: String(msg.content || ""),
+        reasoning: String(msg.reasoning_content || ""),
+        usage: j.usage || null,
+        annotations: msg.annotations || []
+      };
+    });
+  }
+
+  function complete(settings, messages, maxTokens, opts) {
+    opts = opts || {};
+    var url = endpoint(settings.baseUrl, "/chat/completions");
+
+    var model = opts.model === "deepseek-v4-pro" ? "deepseek-v4-pro" : "deepseek-flash";
+
+    var body = {
+      model: model,
+      messages: messages,
+      stream: false,
+      thinking: { type: opts.thinking ? "enabled" : "disabled" },
+      max_tokens: maxTokens || 800
+    };
+
+    // 联网搜索只有 flash 支持
+    if (opts.tools && model === "deepseek-flash") {
+      body.tools = [{ type: "deepseek_web_search" }];
+    }
+
+    return fetch(url, {
+      method: "POST",
+      headers: headers(settings),
+      body: JSON.stringify(body)
     }).then(function (res) {
       if (!res.ok) {
         return res.text().then(function (t) { throw makeApiError(res.status, t); });
@@ -654,6 +703,7 @@
   global.API = {
     chat: chat,
     complete: complete,
+    completeRich: completeRich,
     asr: asr,
     tts: tts,
     testConnection: testConnection,

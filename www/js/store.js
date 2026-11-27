@@ -166,6 +166,9 @@
       ttsVoice: "tide",
       autoRead: false,
       autoMemory: true,
+    lyricBrightness: 0.55,
+    // 用户自己的资料（评论区用）
+    profile: { name: "User", avatar: "" },
       // 是否把「现在几点几分」也告诉模型（会让 system 变化，影响缓存命中）
       showClock: false,
       agreedNotice: false,
@@ -230,6 +233,11 @@
     var dp = (st.settings && st.settings.defaultPersona) || null;
     var legacySys = (st.settings && typeof st.settings.systemPrompt === "string")
       ? st.settings.systemPrompt : "";
+    out.settings.profile = {
+      name: (st.settings && st.settings.profile && st.settings.profile.name) || "User",
+      avatar: (st.settings && st.settings.profile && st.settings.profile.avatar) || ""
+    };
+
     out.settings.defaultPersona = {
       name: (dp && typeof dp.name === "string" && dp.name) || "DeepFish",
       prompt: (dp && typeof dp.prompt === "string" && dp.prompt) ? dp.prompt : legacySys,
@@ -650,6 +658,56 @@
   }
 
 
+
+  /* -------------------- 唱片箱 --------------------
+     索引存 kv["music:index"]（数组，含封面/背景 dataUrl）
+     音频存 kv["music:audio:<id>"]（Blob） */
+  var MUSIC_INDEX = "music:index";
+
+  function listMusic() {
+    return idbGet(MUSIC_INDEX).then(function (v) {
+      return Array.isArray(v) ? v : [];
+    }, function () { return []; });
+  }
+
+  function saveMusicIndex(list) {
+    return idbSet(MUSIC_INDEX, Array.isArray(list) ? list : []).then(function () { return true; },
+      function () { return false; });
+  }
+
+  function putMusicAudio(id, blob) {
+    if (!id || !blob) return Promise.resolve(false);
+    return idbSet("music:audio:" + id, blob).then(function () { return true; }, function () { return false; });
+  }
+
+
+  /* -------------------- 专辑（播放列表） --------------------
+     存在 kv["music:albums"]，结构：
+     { id, name, cover, artist, builtin, discIds: [] }
+     builtin 的「全部唱片 / 我喜欢的唱片」由前端动态算，不写 discIds。 */
+  var ALBUMS_KEY = "music:albums";
+
+  function listAlbums() {
+    return idbGet(ALBUMS_KEY).then(function (v) {
+      return Array.isArray(v) ? v : [];
+    }, function () { return []; });
+  }
+
+  function saveAlbums(list) {
+    return idbSet(ALBUMS_KEY, Array.isArray(list) ? list : []).then(function () { return true; },
+      function () { return false; });
+  }
+
+  function getMusicAudio(id) {
+    if (!id) return Promise.resolve(null);
+    return idbGet("music:audio:" + id).then(function (v) { return v || null; }, function () { return null; });
+  }
+
+  function delMusicAudio(id) {
+    if (!id) return Promise.resolve();
+    return idbDel("music:audio:" + id).catch(function () { });
+  }
+
   /* -------------------- 语音缓存 --------------------
      key = "tts:<replyId>"，value = 音频 Blob。
      和会话数据共用一个 kv store，用前缀区分；
@@ -815,6 +873,13 @@
     buildExport: buildExport,
     importData: importData,
     visibleTurns: visibleTurns,
+    listMusic: listMusic,
+    listAlbums: listAlbums,
+    saveAlbums: saveAlbums,
+    saveMusicIndex: saveMusicIndex,
+    putMusicAudio: putMusicAudio,
+    getMusicAudio: getMusicAudio,
+    delMusicAudio: delMusicAudio,
     getTts: getTts,
     putTts: putTts,
     delTts: delTts,

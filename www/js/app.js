@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.21.3";
+  var AppVersion = "1.25.11";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -90,7 +90,8 @@
     return {
       name: String(p.name || d.name || DEFAULT_NAME).trim() || DEFAULT_NAME,
       prompt: typeof p.prompt === "string" ? p.prompt : "",
-      avatar: p.avatar || ""
+      // 和名字一样：会话没单独设头像时，继承默认角色的头像
+      avatar: p.avatar || d.avatar || ""
     };
   }
 
@@ -1158,6 +1159,1507 @@
     snapToBottom();
   }
 
+
+  function openSheet(id) {
+    var el = $(id);
+    if (!el) return;
+    el.classList.add("open");
+    el.setAttribute("aria-hidden", "false");
+  }
+
+  function closeSheet(id) {
+    var el = $(id);
+    if (!el) return;
+    el.classList.remove("open");
+    el.setAttribute("aria-hidden", "true");
+  }
+
+  /* ==================================================================
+     唱片箱：本地音乐播放器
+     ================================================================== */
+  var disc = {
+    list: [],          // 唱片元数据
+    cur: -1,           // 当前索引
+    audio: null,       // 全局唯一的 <audio>
+    url: null,         // 当前 blob URL
+    wasPlaying: false, // 语音输入前是否在播
+    loading: false,
+    pending: { audioFile: null, cover: null, bg: null, color: "", albumIds: [] },
+    recordStream: null,
+    recorder: null,
+    recordChunks: [],
+    recordMode: false,
+    mode: "list",     // list 列表 / single 单曲 / shuffle 随机
+    albums: [],       // 用户专辑
+    context: "all",   // 当前播放列表：all / fav / 专辑 id
+    sortDesc: true    // 全部唱片：true 新的在前
+  };
+
+  /* 当前播放上下文里的唱片列表 */
+  function ctxList() {
+    var all = disc.list || [];
+
+    if (disc.context === "fav") {
+      return all.filter(function (m) { return m && m.liked; });
+    }
+
+    if (disc.context && disc.context !== "all") {
+      var alb = null;
+      for (var i = 0; i < disc.albums.length; i++) {
+        if (disc.albums[i].id === disc.context) { alb = disc.albums[i]; break; }
+      }
+      if (alb) {
+        var ids = alb.discIds || [];
+        return all.filter(function (m) {
+          return m && ids.indexOf(m.id) !== -1;
+        });
+      }
+    }
+
+    // 全部唱片：按导入时间排序
+    var out = all.slice();
+    out.sort(function (x, y) {
+      var ax = x.createdAt || 0;
+      var ay = y.createdAt || 0;
+      return disc.sortDesc ? (ay - ax) : (ax - ay);
+    });
+    return out;
+  }
+
+  /* 当前播放的唱片对象 */
+  function curDisc() {
+    var list = ctxList();
+    return list[disc.cur] || null;
+  }
+
+  function albumById(id) {
+    for (var i = 0; i < disc.albums.length; i++) {
+      if (disc.albums[i].id === id) return disc.albums[i];
+    }
+    return null;
+  }
+
+  function builtinAlbums() {
+    return [
+      { id: "all", name: "全部唱片", builtin: true },
+      { id: "fav", name: "我喜欢的唱片", builtin: true }
+    ];
+  }
+
+  /* 当前上下文的显示名 */
+  function ctxName() {
+    if (disc.context === "fav") return "我喜欢的唱片";
+    if (disc.context && disc.context !== "all") {
+      var alb = albumById(disc.context);
+      return alb ? alb.name : "全部唱片";
+    }
+    return "全部唱片";
+  }
+
+
+  var DISC_COVER_DEFAULT = "icons/disc-default.jpg";
+
+  function fmtClock(sec) {
+    if (!isFinite(sec) || sec < 0) sec = 0;
+    var m = Math.floor(sec / 60);
+    var s = Math.floor(sec % 60);
+    return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
+  function discAudioEl() {
+    if (!disc.audio) {
+      disc.audio = new Audio();
+      disc.audio.preload = "auto";
+      disc.audio.setAttribute("playsinline", "");
+      disc.audio.addEventListener("timeupdate", onDiscTime);
+      disc.audio.addEventListener("loadedmetadata", onDiscTime);
+      disc.audio.addEventListener("ended", function () {
+        var list = ctxList();
+        if (!list.length) { setDiscPlaying(false); return; }
+
+        if (disc.mode === "single") {
+          playDisc(disc.cur);                       // 单曲循环
+        } else if (disc.mode === "shuffle") {
+          playDisc(nextShuffleIndex());
+        } else {
+          // 列表：到最后一首就停
+          if (disc.cur < list.length - 1) playDisc(disc.cur + 1);
+          else setDiscPlaying(false);
+        }
+      });
+      disc.audio.addEventListener("error", function () {
+        setDiscPlaying(false);
+        toast("这个音频播放不了", 2400);
+      });
+    }
+    return disc.audio;
+  }
+
+  function onDiscTime() {
+    var a = disc.audio;
+    if (!a) return;
+
+    var dur = a.duration || 0;
+    var cur = a.currentTime || 0;
+
+    var seek = $("discSeek");
+    if (seek && dur > 0) seek.value = String(Math.round(cur / dur * 1000));
+
+    var c = $("discCur");
+    if (c) c.textContent = fmtClock(cur);
+    var d = $("discDur");
+    if (d) d.textContent = fmtClock(dur);
+
+    syncLyric(cur);
+
+    // 歌词编辑器开着时，同步它自己的进度条
+    if ($("lyricSheet") && $("lyricSheet").classList.contains("open")) {
+      syncLePlayer();
+    }
+  }
+
+  function setDiscPlaying(on) {
+    var vinyl = $("discVinyl");
+    if (vinyl) {
+      // 一旦开始过旋转就一直保留 spinning，暂停只切 paused，
+      // 这样唱片不会转回原点
+      if (on) vinyl.classList.add("spinning");
+      vinyl.classList.toggle("paused", !on);
+    }
+
+    var page = $("discPage");
+    if (page) page.classList.toggle("playing", !!on);
+
+    var btn = $("btnDiscPlay");
+    if (btn) {
+      btn.innerHTML = on
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h4.5v14H5zM14.5 5H19v14h-4.5z"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>';
+      btn.setAttribute("aria-label", on ? "暂停" : "播放");
+    }
+  }
+
+  function releaseDiscUrl() {
+    if (disc.url) {
+      try { URL.revokeObjectURL(disc.url); } catch (e) { }
+      disc.url = null;
+    }
+  }
+
+  function playDisc(i) {
+    var list = ctxList();
+    if (!list.length) return;
+    if (i < 0) i = 0;
+    if (i >= list.length) i = list.length - 1;
+
+    var item = list[i];
+    if (!item) return;
+
+    // 换唱片时把角度归正（暂停状态的角度保留是另一回事）
+    var vinylEl = $("discVinyl");
+    if (vinylEl) {
+      vinylEl.classList.remove("spinning", "paused");
+    }
+
+    disc.cur = i;
+    renderDiscNowPlaying();
+    renderDiscList();
+
+    // 换歌时歌词界面要跟着换：重解析歌词 + 刷新顶部歌名作者
+    if (lyric.open) {
+      openLyric();
+    }
+
+    var a = discAudioEl();
+
+    Store.getMusicAudio(item.id).then(function (blob) {
+      if (!blob) {
+        toast("找不到这个音频文件", 2400);
+        return;
+      }
+
+      releaseDiscUrl();
+      disc.url = URL.createObjectURL(blob);
+
+      a.src = disc.url;
+      a.play().then(function () {
+        setDiscPlaying(true);
+      }).catch(function () {
+        setDiscPlaying(false);
+        toast("点了播放才能开始（浏览器限制）", 2200);
+      });
+    });
+  }
+
+  function toggleDiscPlay() {
+    if (!disc.list.length) {
+      toast("唱片箱还是空的，先添加一首吧", 2200);
+      return;
+    }
+
+    var a = discAudioEl();
+
+    if (disc.cur < 0 || !a.src) {
+      playDisc(disc.cur >= 0 ? disc.cur : 0);
+      return;
+    }
+
+    if (a.paused) {
+      a.play().then(function () { setDiscPlaying(true); })
+        .catch(function () { toast("播放失败", 2200); });
+    } else {
+      a.pause();
+      setDiscPlaying(false);
+    }
+  }
+
+  function renderDiscNowPlaying() {
+    var item = curDisc();
+
+    var cover = $("discCover");
+    if (cover) cover.src = (item && item.cover) || DISC_COVER_DEFAULT;
+
+    var name = $("discSongName");
+    if (name) name.textContent = item ? (item.title || "未命名唱片") : "唱片箱";
+
+    var sub = $("discSongSub");
+    if (sub) {
+      sub.textContent = item
+        ? (item.artist ? item.artist : (item.recorded ? "录音" : "本地唱片"))
+        : "添加一首歌，或者录一段声音";
+    }
+
+    var bg = $("discBg");
+    if (bg) {
+      var img = item && item.bg;
+      if (img) {
+        bg.style.backgroundImage = 'url("' + img + '")';
+        bg.style.backgroundColor = "";
+        bg.classList.remove("solid");
+      } else if (item && item.cover) {
+        // 没单独设背景：用唱片封面本身做背景，比纯色好看得多
+        bg.style.backgroundImage = 'url("' + item.cover + '")';
+        bg.style.backgroundColor = item.color || "";
+        bg.classList.remove("solid");
+      } else {
+        // 连封面都没有（默认唱片）→ 用默认素材
+        bg.style.backgroundImage = 'url("' + DISC_COVER_DEFAULT + '")';
+        bg.style.backgroundColor = (item && item.color) || "";
+        bg.classList.remove("solid");
+      }
+    }
+
+    var btnCover = $("discBtnCover");
+    if (btnCover) btnCover.src = (item && item.cover) || DISC_COVER_DEFAULT;
+
+    updateDiscLike();
+    renderDiscMode();
+  }
+
+  function renderDiscList() {
+    var body = $("discListBody");
+    if (!body) return;
+
+    var list = ctxList();
+
+    if (!list.length) {
+      body.innerHTML = '<div class="empty-tip" style="color:rgba(255,255,255,.5)">还没有唱片<br>点下面的「添加唱片」或「录音」</div>';
+      return;
+    }
+
+    var html = "";
+    list.forEach(function (m, i) {
+      html += '<div class="disc-item' + (i === disc.cur ? " on" : "") + '" data-di="' + i + '">' +
+        '<img src="' + esc(m.cover || DISC_COVER_DEFAULT) + '" alt="">' +
+        '<div class="disc-item-main">' +
+        '<div class="disc-item-title">' + esc(m.title || "未命名唱片") + "</div>" +
+        '<div class="disc-item-sub">' + (m.recorded ? "录音" : "本地音乐") + "</div>" +
+        "</div>" +
+        '<button class="disc-item-del" type="button" data-dedit="' + esc(m.id) + '" aria-label="编辑">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18 10a2.8 2.8 0 10-4-4L4 16z"/></svg>' +
+        "</button>" +
+        '<button class="disc-item-del" type="button" data-ddel="' + esc(m.id) + '" aria-label="删除">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>' +
+        "</button></div>";
+    });
+    body.innerHTML = html;
+  }
+
+
+  function nextShuffleIndex() {
+    var list = ctxList();
+    if (list.length < 2) return 0;
+    var i = disc.cur;
+    var guard = 0;
+    while (i === disc.cur && guard++ < 30) {
+      i = Math.floor(Math.random() * list.length);
+    }
+    return i;
+  }
+
+  function renderDiscMode() {
+    var btn = $("btnDiscMode");
+    if (!btn) return;
+
+    var icons = {
+      list: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h12l-3-3M20 17H8l3 3"/></svg>',
+      single: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 108-8"/><path d="M12 8v5l3 2"/></svg>',
+      shuffle: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h4l8 12h4M16 6h4v4M20 18v-4"/><path d="M4 18h4l3-4.5"/></svg>'
+    };
+    var names = { list: "列表循环到末尾停止", single: "单曲循环", shuffle: "随机播放" };
+
+    btn.innerHTML = icons[disc.mode] || icons.list;
+    btn.setAttribute("aria-label", names[disc.mode] || "播放模式");
+    btn.classList.toggle("on", disc.mode !== "list");
+  }
+
+  function cycleDiscMode() {
+    disc.mode = disc.mode === "list" ? "single" : (disc.mode === "single" ? "shuffle" : "list");
+    renderDiscMode();
+    var names = { list: "列表播放", single: "单曲循环", shuffle: "随机播放" };
+    toast(names[disc.mode], 1400);
+  }
+
+  function updateDiscLike() {
+    var item = curDisc();
+    var btn = $("btnDiscLike");
+    if (!btn) return;
+    btn.classList.toggle("liked", !!(item && item.liked));
+  }
+
+  function toggleDiscLike() {
+    var item = curDisc();
+    if (!item) { toast("先放一首歌吧", 1800); return; }
+    item.liked = !item.liked;
+    Store.saveMusicIndex(disc.list);
+    updateDiscLike();
+    toast(item.liked ? "已喜欢" : "已取消喜欢", 1400);
+  }
+
+
+  /* ==================================================================
+     邀请对话里的角色来评论这首歌
+     ================================================================== */
+  function invitePromptText(item) {
+    var lines = [];
+    lines.push("【邀请评论】");
+    lines.push("");
+    lines.push("歌名：" + (item.title || "未命名"));
+    if (item.artist) lines.push("作者：" + item.artist);
+    lines.push("");
+
+    var lyr = String(item.lyrics || "").trim();
+    if (lyr) {
+      lines.push("歌词：");
+      lines.push(lyr);
+      lines.push("");
+    }
+
+    var tr = String(item.translation || "").trim();
+    if (tr) {
+      lines.push("译文：");
+      lines.push(tr);
+      lines.push("");
+    }
+
+    lines.push("请以你自己的身份，写一段对这首歌的评论，100 到 200 字，写得真诚一点，不要客套。");
+    return lines.join("\n");
+  }
+
+  function openInvitePicker() {
+    var item = curDisc();
+    if (!item) { toast("先放一首歌吧", 1800); return; }
+
+    if ($("inviteText")) $("inviteText").value = "";
+    if ($("inviteThink")) $("inviteThink").checked = false;
+    if ($("inviteSearch")) $("inviteSearch").checked = false;
+
+    var box = $("inviteList");
+    if (!box) return;
+
+    var list = (state.sessions || []).slice();
+    if (!list.length) {
+      box.innerHTML = '<div class="empty-tip">还没有其它对话</div>';
+    } else {
+      list.sort(function (x, y) { return (y.updatedAt || 0) - (x.updatedAt || 0); });
+      var html = "";
+      list.forEach(function (ss) {
+        var p = personaOf(ss);
+        var canSearch = (ss.chat && ss.chat.model === "deepseek-v4-pro") ? false : true;
+        var tags = [];
+        if (ss.chat && ss.chat.thinking) tags.push("思考");
+        if (ss.chat && ss.chat.webSearch && canSearch) tags.push("搜索");
+        if (ss.chat && ss.chat.model === "deepseek-v4-pro") tags.push("Pro");
+
+        html += '<button class="invite-item" type="button" data-invite="' + esc(ss.id) + '">' +
+          '<img src="' + esc(avatarOf(p)) + '" alt="">' +
+          '<div class="invite-item-main">' +
+          '<div class="invite-item-title">' + esc(ss.title || "未命名对话") + "</div>" +
+          '<div class="invite-item-sub">' + esc(p.name) + (tags.length ? " · " + tags.join(" · ") : "") + "</div>" +
+          "</div></button>";
+      });
+      box.innerHTML = html;
+    }
+
+    closeSheet("discComments");
+    openSheet("inviteSheet");
+  }
+
+  function inviteToSession(sessionId) {
+    var item = curDisc();
+    if (!item) return;
+
+    var ss = null;
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId) { ss = state.sessions[i]; break; }
+    }
+    if (!ss) { toast("找不到这个对话", 2000); return; }
+
+    closeSheet("inviteSheet");
+
+    var model = (ss.chat && ss.chat.model) || "deepseek-flash";
+
+    var wantThink = $("inviteThink") ? $("inviteThink").checked : false;
+    var wantSearch = $("inviteSearch") ? $("inviteSearch").checked : false;
+    var inviteText = $("inviteText") ? $("inviteText").value.trim() : "";
+
+    if (wantSearch && model === "deepseek-v4-pro") {
+      toast("Pro 模型不支持联网搜索，已自动关闭", 2400);
+      wantSearch = false;
+    }
+
+    var persona = personaOf(ss);
+    var sys = "你是「" + (persona.name || "助手") + "」。";
+
+    var userContent = invitePromptText(item);
+    if (inviteText) {
+      userContent += "\n\n【邀请人的话】\n" + inviteText;
+    }
+
+    var messages = [
+      { role: "system", content: sys },
+      { role: "user", content: userContent }
+    ];
+
+    toast("正在邀请「" + (persona.name || "他") + "」写评论…", 2600);
+
+    API.completeRich(settings, messages, 900, {
+      model: model,
+      thinking: wantThink,
+      tools: wantSearch
+    }).then(function (res) {
+      var comment = String(res.text || "").trim();
+      var reasoning = String(res.reasoning || "").trim();
+      if (!comment) { toast("他没写出东西来", 2200); return; }
+
+      // 1）写进评论区
+      if (!Array.isArray(item.comments)) item.comments = [];
+      item.comments.push({
+        text: comment,
+        at: new Date().toLocaleString("zh-CN", {
+          month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"
+        }),
+        from: persona.name || "AI",
+        avatar: avatarOf(persona),
+        sessionId: ss.id,          // 记下来源对话，渲染时动态取角色头像
+        inviteText: inviteText || "",
+        reasoning: reasoning || ""
+      });
+      Store.saveMusicIndex(disc.list);
+
+      // 2）同时作为一条真实消息写进那个对话
+      var now = Date.now();
+      var turn = {
+        id: Store.uid("t"),
+        role: "user",
+        createdAt: now,
+        activeEdit: 0,
+        branch: null,
+        edits: [{
+          id: Store.uid("e"),
+          text: "【邀请评论】请评价《" + (item.title || "未命名") + "》",
+          createdAt: now,
+          images: [],
+          files: [],
+          activeReply: 0,
+          replies: [{
+            id: Store.uid("r"),
+            content: comment,
+            reasoning: "",
+            model: model,
+            createdAt: now + 1
+          }]
+        }]
+      };
+
+      ss.messages.push(turn);
+      ss.updatedAt = now;
+      Store.save();
+
+      // 如果正开着这个对话，刷新
+      if (getSession() && getSession().id === ss.id) {
+        renderMessages();
+        renderDrawer();
+      } else {
+        renderDrawer();
+      }
+
+      renderDiscComments();
+      toast("「" + (persona.name || "TA") + "」的评论已发布", 2200);
+    }).catch(function (err) {
+      toast(err && err.message ? err.message : "邀请失败", 3200);
+    });
+  }
+
+  function openDiscComments() {
+    var item = curDisc();
+    if (!item) { toast("先放一首歌吧", 1800); return; }
+
+    var title = $("discCommentTitle");
+    if (title) title.textContent = "评论 · " + (item.title || "未命名");
+
+    refreshDiscMe();
+    renderDiscComments();
+    $("discComments").hidden = false;
+  }
+
+
+  function profileOf() {
+    var p = settings && settings.profile;
+    return {
+      name: (p && p.name) || "User",
+      avatar: (p && p.avatar) || ""
+    };
+  }
+
+  function profileAvatar() {
+    return profileOf().avatar || "icons/user-default.png";
+  }
+
+  function refreshDiscMe() {
+    var p = profileOf();
+    if ($("discMeAvatar")) $("discMeAvatar").src = profileAvatar();
+    if ($("discMeName")) $("discMeName").textContent = p.name;
+  }
+
+  var profileEdit = { avatar: "" };
+
+  function openProfileEdit() {
+    var p = profileOf();
+    profileEdit.avatar = p.avatar || "";
+    if ($("profileNameInput")) $("profileNameInput").value = p.name;
+    if ($("profileAvatarPreview")) $("profileAvatarPreview").src = profileAvatar();
+    openSheet("profileSheet");
+  }
+
+  function saveProfile() {
+    settings.profile = {
+      name: ($("profileNameInput") ? $("profileNameInput").value.trim() : "") || "User",
+      avatar: profileEdit.avatar || ""
+    };
+    settings.profile.name = settings.profile.name.slice(0, 20);
+    Store.save();
+    refreshDiscMe();
+    closeSheet("profileSheet");
+    renderDiscComments();
+    toast("资料已更新", 1400);
+  }
+
+  function renderDiscComments() {
+    var item = curDisc();
+    var body = $("discCommentBody");
+    if (!body) return;
+
+    var list = (item && item.comments) || [];
+    if (!list.length) {
+      body.innerHTML = '<div class="empty-tip" style="color:rgba(255,255,255,.45)">还没有评论</div>';
+      return;
+    }
+
+    var html = "";
+    list.forEach(function (c) {
+      var fromName = c.from || "匿名";
+      var av = c.avatar || "";
+
+      // 有来源对话就以那个对话的角色卡为准（角色改了头像/名字，评论也跟着变）
+      if (c.sessionId) {
+        var ss = null;
+        for (var si = 0; si < state.sessions.length; si++) {
+          if (state.sessions[si].id === c.sessionId) { ss = state.sessions[si]; break; }
+        }
+        if (ss) {
+          var sp = personaOf(ss);
+          fromName = sp.name || fromName;
+          av = avatarOf(sp);
+        }
+      }
+
+      if (!av) av = c.mine ? profileAvatar() : "icons/avatar-256.png";
+
+      html += '<div class="disc-comment">' +
+        '<img class="dc-avatar" src="' + esc(av) + '" alt="">' +
+        '<div class="dc-body">' +
+        '<div class="dc-head"><span class="dc-name">' + esc(fromName) + "</span>" +
+        '<span class="dc-time">' + esc(c.at || "") + "</span></div>";
+
+      if (c.inviteText) {
+        html += '<details class="dc-fold"><summary>邀请词</summary>' +
+          '<div class="dc-fold-body">' + esc(c.inviteText) + "</div></details>";
+      }
+
+      if (c.reasoning) {
+        html += '<details class="dc-fold think"><summary>思考过程</summary>' +
+          '<div class="dc-fold-body">' + esc(c.reasoning) + "</div></details>";
+      }
+
+      html += '<div class="dc-text">' + esc(c.text) + "</div>" +
+        "</div></div>";
+    });
+    body.innerHTML = html;
+  }
+
+  function sendDiscComment() {
+    var item = curDisc();
+    if (!item) return;
+
+    var input = $("discCommentInput");
+    var text = input ? input.value.trim() : "";
+    if (!text) return;
+
+    if (!Array.isArray(item.comments)) item.comments = [];
+    var me = profileOf();
+    item.comments.push({
+      text: text.slice(0, 200),
+      at: new Date().toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }),
+      from: me.name,
+      avatar: profileAvatar(),
+      mine: true
+    });
+
+    Store.saveMusicIndex(disc.list);
+    if (input) input.value = "";
+    renderDiscComments();
+    toast("已评论", 1200);
+  }
+
+
+  /* 取图片的主色调（缩到 24x24 求平均，足够稳） */
+  function dominantColor(dataUrl) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var c = document.createElement("canvas");
+          c.width = 24;
+          c.height = 24;
+          var ctx = c.getContext("2d");
+          ctx.drawImage(img, 0, 0, 24, 24);
+
+          var d = ctx.getImageData(0, 0, 24, 24).data;
+          var r = 0, g = 0, b = 0, n = 0;
+          for (var i = 0; i < d.length; i += 4) {
+            if (d[i + 3] < 128) continue;
+            r += d[i]; g += d[i + 1]; b += d[i + 2]; n++;
+          }
+          if (!n) { resolve(""); return; }
+          resolve("rgb(" + Math.round(r / n) + "," + Math.round(g / n) + "," + Math.round(b / n) + ")");
+        } catch (e) { resolve(""); }
+      };
+      img.onerror = function () { resolve(""); };
+      img.src = dataUrl;
+    });
+  }
+
+  /* 打开「添加唱片」并切换成编辑模式 */
+  /* 歌词态下，点歌名右边的「更多」打开编辑 */
+  function openLyricTools() {
+    if (lyric.stampMode) { lyric.stampMode = false; renderLyric(); toast("已退出打时间戳", 1500); return; }
+    openLyricEditor();
+  }
+
+
+  function openTransEditor() {
+    var item = curDisc();
+    if (!item) { toast("先放一首歌吧", 1800); return; }
+    $("transInput").value = item.translation || "";
+    openSheet("transSheet");
+  }
+
+  function saveTrans() {
+    var item = curDisc();
+    if (!item) return;
+
+    item.translation = $("transInput") ? $("transInput").value : "";
+    Store.saveMusicIndex(disc.list);
+
+    lyric.trans = String(item.translation || "").split(/\r?\n/).map(function (s) {
+      return s.trim();
+    });
+
+    renderLyric();
+    closeSheet("transSheet");
+    toast("译文已保存", 1400);
+  }
+
+  /* 「设置歌词时间戳」→ 打开带播放进度条的编辑器 */
+  function startStampMode() {
+    closeSheet("lyricMenuSheet");
+    openLyricEditor();
+  }
+
+  function openDiscEdit(discId) {
+    var item = null;
+    var realIdx = -1;
+    for (var ei = 0; ei < disc.list.length; ei++) {
+      if (disc.list[ei].id === discId) { item = disc.list[ei]; realIdx = ei; break; }
+    }
+    if (!item) return;
+
+    disc.editingIndex = realIdx;
+    disc.pending = {
+      audioFile: null, cover: null, bg: null,
+      color: item.color || "",
+      albumIds: (item.albumIds || []).slice()
+    };
+    renderAlbumPick(disc.pending.albumIds);
+
+    if ($("discNameInput")) $("discNameInput").value = item.title || "";
+    if ($("discArtistInput")) $("discArtistInput").value = item.artist || "";
+    if ($("discCoverPreview")) $("discCoverPreview").src = item.cover || DISC_COVER_DEFAULT;
+    if ($("discBgPreview")) $("discBgPreview").src = item.bg || DISC_COVER_DEFAULT;
+    if ($("discAudioName")) $("discAudioName").textContent = "（编辑中，不更换音频）";
+
+    openSheet("discAddSheet");
+  }
+
+  function saveDiscEdit() {
+    var i = disc.editingIndex;
+    var item = disc.list[i];
+    if (!item) return;
+
+    item.title = ($("discNameInput") ? $("discNameInput").value.trim() : "") || item.title;
+    item.artist = ($("discArtistInput") ? $("discArtistInput").value.trim() : "");
+    if (disc.pending.cover) item.cover = disc.pending.cover;
+    if (disc.pending.bg) item.bg = disc.pending.bg;
+    if (disc.pending.color) item.color = disc.pending.color;
+    item.albumIds = (disc.pending.albumIds || []).slice();
+
+    Store.saveMusicIndex(disc.list).then(function () {
+      closeSheet("discAddSheet");
+      disc.editingIndex = -1;
+      renderDiscNowPlaying();
+      renderDiscList();
+      toast("已更新", 1400);
+    });
+  }
+
+  /* ==================================================================
+     歌词
+     ================================================================== */
+  var lyric = {
+    lines: [],       // [{ t: 秒, text }]，t = -1 表示还没打时间戳
+    trans: [],       // 译文，和 lines 按下标对应
+    cur: -1,
+    stampMode: false,
+    open: false,
+    showTrans: true  // 「译」按钮：译文显示开关
+  };
+
+  function parseLrc(text) {
+    var out = [];
+    var raw = String(text || "").split(/\r?\n/);
+
+    var re = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
+
+    raw.forEach(function (line) {
+      var times = [];
+      var m;
+      re.lastIndex = 0;
+      while ((m = re.exec(line)) !== null) {
+        var min = parseInt(m[1], 10);
+        var sec = parseInt(m[2], 10);
+        var frac = 0;
+        if (m[3]) {
+          frac = parseInt(m[3], 10) / Math.pow(10, m[3].length);
+        }
+        times.push(min * 60 + sec + frac);
+      }
+
+      var txt = line.replace(re, "").trim();
+      if (!txt) return;
+
+      if (times.length) {
+        times.forEach(function (t) { out.push({ t: t, text: txt }); });
+      } else {
+        out.push({ t: -1, text: txt });
+      }
+    });
+
+    // 有时间的排前面，没时间的留在末尾
+    out.sort(function (x, y) {
+      var a = x.t < 0 ? 1e9 : x.t;
+      var b = y.t < 0 ? 1e9 : y.t;
+      return a - b;
+    });
+
+    return out;
+  }
+
+  function lyricToText() {
+    return lyric.lines.map(function (l) {
+      if (l.t < 0) return l.text;
+      var min = Math.floor(l.t / 60);
+      var sec = l.t - min * 60;
+      var s = ("0" + min).slice(-2) + ":" + ("00" + sec.toFixed(2)).slice(-5);
+      return "[" + s + "]" + l.text;
+    }).join("\n");
+  }
+
+  function renderLyric() {
+    var body = $("lyricBody");
+    if (!body) return;
+
+    if (!lyric.lines.length) {
+      body.innerHTML = '<div class="lyric-line">还没有歌词</div>' +
+        '<div class="lyric-line" style="font-size:13px">点下面的「粘贴歌词」，或者先把纯文本粘贴进来，再逐行打时间戳</div>';
+      return;
+    }
+
+    var html = "";
+    lyric.lines.forEach(function (l, i) {
+      var tag = "";
+      if (lyric.stampMode) {
+        tag = '<span class="stamp-tag">' + (l.t < 0 ? "--:--" : fmtClock(l.t)) + "</span>";
+      }
+      var tr = (lyric.showTrans && lyric.trans[i])
+        ? '<span class="lyric-trans">' + esc(lyric.trans[i]) + "</span>"
+        : "";
+      html += '<div class="lyric-line' + (i === lyric.cur ? " on" : "") +
+        (lyric.stampMode ? " stamp" : "") + '" data-li="' + i + '">' +
+        tag + esc(l.text) + tr + "</div>";
+    });
+    body.innerHTML = html;
+  }
+
+  function syncLyric(time) {
+    if (!lyric.open || !lyric.lines.length) return;
+
+    var idx = -1;
+    for (var i = 0; i < lyric.lines.length; i++) {
+      if (lyric.lines[i].t >= 0 && lyric.lines[i].t <= time + 0.2) idx = i;
+    }
+    if (idx === lyric.cur) return;
+
+    lyric.cur = idx;
+
+    var body = $("lyricBody");
+    if (!body) return;
+
+    var nodes = body.querySelectorAll(".lyric-line");
+    for (var k = 0; k < nodes.length; k++) {
+      nodes[k].classList.toggle("on", k === idx);
+    }
+
+    if (idx >= 0 && nodes[idx]) {
+      var el = nodes[idx];
+      var target = el.offsetTop - body.clientHeight / 2 + el.offsetHeight / 2;
+      if (target < 0) target = 0;
+      body.scrollTo({ top: target, behavior: "smooth" });
+    }
+  }
+
+
+  /* 歌词背景亮度（0.2 ~ 1.0） */
+  function applyLyricBrightness(v) {
+    var b = parseFloat(v);
+    if (!isFinite(b)) b = 0.55;
+    b = Math.max(0.2, Math.min(1, b));
+    document.documentElement.style.setProperty("--lyric-bright", String(b));
+  }
+
+  function loadLyricBrightness() {
+    var v = settings.lyricBrightness;
+    if (typeof v !== "number" || !isFinite(v)) v = 0.55;
+    applyLyricBrightness(v);
+    if ($("lyricBright")) $("lyricBright").value = String(Math.round(v * 100));
+  }
+
+  function openLyric() {
+    var item = curDisc();
+    if (!item) { toast("先放一首歌吧", 1800); return; }
+
+    lyric.lines = parseLrc(item.lyrics || "");
+    lyric.cur = -1;
+    lyric.open = true;
+    lyric.stampMode = false;
+
+    var bg = $("lyricBg");
+    if (bg) {
+      if (item.bg) bg.style.backgroundImage = 'url("' + item.bg + '")';
+      else if (item.color) { bg.style.backgroundImage = ""; bg.style.backgroundColor = item.color; }
+      else bg.style.backgroundImage = 'url("' + ((item.cover) || DISC_COVER_DEFAULT) + '")';
+    }
+
+    // 顶部「唱片箱」渐变成歌名 + 作者
+    if ($("dhtMain")) $("dhtMain").textContent = item.title || "未命名唱片";
+    if ($("dhtSub")) $("dhtSub").textContent = item.artist || "";
+
+    lyric.trans = String(item.translation || "").split(/\r?\n/).map(function (s) {
+      return s.trim();
+    });
+
+    // 歌词态才显示「译 / …」
+    if ($("btnLyricTrans")) {
+      $("btnLyricTrans").hidden = false;
+      $("btnLyricTrans").classList.toggle("on", lyric.showTrans);
+    }
+    if ($("btnLyricMore")) $("btnLyricMore").hidden = false;
+
+    renderLyric();
+    $("discPage").classList.add("show-lyric");
+
+    syncLyric(disc.audio ? disc.audio.currentTime : 0);
+  }
+
+  function closeLyric() {
+    lyric.open = false;
+    lyric.stampMode = false;
+    $("discPage").classList.remove("show-lyric");
+
+    if ($("dhtMain")) $("dhtMain").textContent = "唱片箱";
+    if ($("dhtSub")) $("dhtSub").textContent = "";
+    if ($("btnLyricTrans")) $("btnLyricTrans").hidden = true;
+    if ($("btnLyricMore")) $("btnLyricMore").hidden = true;
+  }
+
+  /* ---------------- 歌词编辑器（带播放进度与时间戳录入） ---------------- */
+  var le = {
+    rows: [],          // [{ t: 秒, text: "" }]
+    playing: false,
+    wasPlaying: false
+  };
+
+  function lrcTime(t) {
+    var m = Math.floor(t / 60);
+    var s = t - m * 60;
+    return ("0" + m).slice(-2) + ":" + ("00" + s.toFixed(2)).slice(-5);
+  }
+
+  function openLyricEditor() {
+    var item = curDisc();
+    if (!item) { toast("先放一首歌吧", 1800); return; }
+
+    // 打开编辑时先停下来：音乐和朗读都暂停
+    stopSpeaking();
+    le.wasPlaying = !!(disc.audio && !disc.audio.paused);
+    if (disc.audio) {
+      disc.audio.pause();
+      setDiscPlaying(false);
+    }
+    le.playing = false;
+
+    le.rows = parseLrc(item.lyrics || "").map(function (l) {
+      return { t: l.t, text: l.text };
+    });
+    if (!le.rows.length) le.rows.push({ t: -1, text: "" });
+
+    $("lyricInput").value = item.lyrics || "";
+
+    renderLeLines();
+    syncLePlayer();
+    updateLePlayBtn();
+    openSheet("lyricSheet");
+  }
+
+  function closeLeSheet() {
+    closeSheet("lyricSheet");
+
+    // 退出时恢复之前的播放状态
+    var audio = discAudioEl();
+    if (le.wasPlaying && audio && audio.paused) {
+      audio.play().then(function () { setDiscPlaying(true); }).catch(function () { });
+    }
+    le.wasPlaying = false;
+    le.playing = false;
+  }
+
+  function renderLeLines() {
+    var box = $("leLines");
+    if (!box) return;
+
+    var html = "";
+    le.rows.forEach(function (r, i) {
+      var stamp;
+      if (r.t >= 0) {
+        stamp = '<button class="le-stamp" type="button" data-stampdel="' + i + '">' +
+          lrcTime(r.t) + ' <span class="le-del">×</span></button>';
+      } else {
+        stamp = '<button class="le-stamp none" type="button" data-stampadd="' + i + '">无</button>';
+      }
+
+      html += '<div class="le-line">' + stamp +
+        '<input class="le-text" type="text" data-letext="' + i + '"' +
+        ' value="' + esc(r.text) + '" placeholder="这一行歌词…" autocomplete="off">' +
+        "</div>";
+    });
+
+    box.innerHTML = html;
+  }
+
+  function updateLePlayBtn() {
+    var btn = $("lePlay");
+    if (!btn) return;
+    btn.classList.toggle("on", le.playing);
+    btn.innerHTML = le.playing
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h4.5v14H5zM14.5 5H19v14h-4.5z"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>';
+    btn.setAttribute("aria-label", le.playing ? "暂停" : "播放");
+  }
+
+  function syncLePlayer() {
+    var a = disc.audio;
+    if (!a) return;
+
+    var dur = a.duration || 0;
+    var cur = a.currentTime || 0;
+
+    var seek = $("leSeek");
+    if (seek && dur > 0) seek.value = String(Math.round(cur / dur * 1000));
+
+    if ($("leCur")) $("leCur").textContent = fmtClock(cur);
+    if ($("leDur")) $("leDur").textContent = fmtClock(dur);
+  }
+
+  function toggleLePlay() {
+    var a = discAudioEl();
+    if (!a.src) { toast("这张唱片还没加载音频", 2000); return; }
+
+    if (a.paused) {
+      a.play().then(function () {
+        le.playing = true;
+        updateLePlayBtn();
+      }).catch(function () {
+        toast("播放失败，再点一次试试", 2000);
+      });
+    } else {
+      a.pause();
+      le.playing = false;
+      updateLePlayBtn();
+      // 只有「暂停」这一刻才记时间戳
+      captureLeStamp(a.currentTime);
+    }
+  }
+
+  /* 暂停时把当前时间记到最后一行；如果最后一行还没写字，就替换它的时间 */
+  function captureLeStamp(t) {
+    var last = le.rows[le.rows.length - 1];
+
+    if (last && !String(last.text || "").trim()) {
+      last.t = t;
+    } else {
+      le.rows.push({ t: t, text: "" });
+    }
+
+    renderLeLines();
+    syncLePlayer();
+
+    var inputs = $("leLines") ? $("leLines").querySelectorAll(".le-text") : [];
+    if (inputs.length) {
+      try { inputs[inputs.length - 1].focus(); } catch (e) { }
+    }
+  }
+
+  function saveLe() {
+    var item = curDisc();
+    if (!item) return;
+
+    // 没文字、也没时间戳的空行丢掉
+    var rows = le.rows.filter(function (r) {
+      return String(r.text || "").trim() || r.t >= 0;
+    });
+
+    item.lyrics = rows.map(function (r) {
+      if (r.t < 0) return r.text;
+      return "[" + lrcTime(r.t) + "]" + r.text;
+    }).join("\n");
+
+    Store.saveMusicIndex(disc.list);
+
+    lyric.lines = parseLrc(item.lyrics);
+    lyric.cur = -1;
+    renderLyric();
+
+    closeLeSheet();
+    toast(lyric.lines.length ? ("已保存 " + lyric.lines.length + " 行") : "歌词已清空", 1600);
+  }
+
+  function toggleStampMode() {
+    lyric.stampMode = !lyric.stampMode;
+    renderLyric();
+    toast(lyric.stampMode ? "点某一行，把当前播放时间写进去" : "已退出打时间戳", 2000);
+  }
+
+  function stampLine(i) {
+    var item = curDisc();
+    if (!item || !lyric.lines[i]) return;
+
+    var t = disc.audio ? disc.audio.currentTime : 0;
+    lyric.lines[i].t = t;
+
+    // 重新排序
+    lyric.lines.sort(function (x, y) {
+      var a = x.t < 0 ? 1e9 : x.t;
+      var b = y.t < 0 ? 1e9 : y.t;
+      return a - b;
+    });
+
+    item.lyrics = lyricToText();
+    Store.saveMusicIndex(disc.list);
+
+    lyric.cur = -1;
+    renderLyric();
+    syncLyric(t);
+    toast("已设为 " + fmtClock(t), 1400);
+  }
+
+
+  /* ==================================================================
+     专辑（播放列表）
+     ================================================================== */
+  var albumNew = { cover: "" };
+  var albumEditingId = null;
+
+  function editAlbumCover(albumId) {
+    albumEditingId = albumId;
+    var inp = $("albumEditCoverFile");
+    if (!inp) return;
+    inp.value = "";
+    inp.click();
+  }
+
+  function openAlbums() {
+    renderAlbums();
+    if ($("btnAlbumSort")) {
+      $("btnAlbumSort").textContent = "全部唱片：" + (disc.sortDesc ? "新的在前" : "旧的在前");
+    }
+    openSheet("albumSheet");
+  }
+
+  function renderAlbums() {
+    var box = $("albumList");
+    if (!box) return;
+
+    var all = builtinAlbums();
+    var html = "";
+
+    all.forEach(function (alb) {
+      var count = alb.id === "fav"
+        ? disc.list.filter(function (m) { return m && m.liked; }).length
+        : disc.list.length;
+
+      var cover = alb.id === "fav"
+        ? ((disc.list.filter(function (m) { return m && m.liked; })[0] || {}).cover || DISC_COVER_DEFAULT)
+        : ((disc.list[0] || {}).cover || DISC_COVER_DEFAULT);
+
+      html += '<button class="album-item' + (disc.context === alb.id ? " on" : "") +
+        '" type="button" data-album="' + alb.id + '">' +
+        '<img src="' + esc(cover) + '" alt="">' +
+        '<div class="album-item-main">' +
+        '<div class="album-item-name">' + esc(alb.name) + "</div>" +
+        '<div class="album-item-sub">' + count + " 张唱片</div>" +
+        "</div></button>";
+    });
+
+    // 用户专辑
+    disc.albums.forEach(function (alb) {
+      var ids = alb.discIds || [];
+      var count = disc.list.filter(function (m) { return m && ids.indexOf(m.id) !== -1; }).length;
+
+      html += '<button class="album-item' + (disc.context === alb.id ? " on" : "") +
+        '" type="button" data-album="' + esc(alb.id) + '">' +
+        '<img src="' + esc(alb.cover || DISC_COVER_DEFAULT) + '" alt="">' +
+        '<div class="album-item-main">' +
+        '<div class="album-item-name">' + esc(alb.name) + "</div>" +
+        '<div class="album-item-sub">' + count + " 张唱片</div>" +
+        "</div>" +
+        '<span class="album-item-del" data-albumcover="' + esc(alb.id) + '">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18 10a2.8 2.8 0 10-4-4L4 16z"/></svg>' +
+        "</span>" +
+        '<span class="album-item-del" data-albumdel="' + esc(alb.id) + '">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>' +
+        "</span></button>";
+    });
+
+    box.innerHTML = html;
+  }
+
+  function switchAlbum(id) {
+    disc.context = id;
+    disc.cur = 0;
+
+    var list = ctxList();
+    closeSheet("albumSheet");
+
+    if (list.length) {
+      playDisc(0);
+    } else {
+      renderDiscNowPlaying();
+      renderDiscList();
+      toast(ctxName() + " 里还没有唱片", 2000);
+    }
+  }
+
+  function openAlbumNew() {
+    albumNew.cover = "";
+    if ($("albumNameInput")) $("albumNameInput").value = "";
+    if ($("albumCoverPreview")) $("albumCoverPreview").src = DISC_COVER_DEFAULT;
+    openSheet("albumNewSheet");
+  }
+
+  function createAlbum() {
+    var name = $("albumNameInput") ? $("albumNameInput").value.trim() : "";
+    if (!name) { toast("给专辑起个名字", 1800); return; }
+
+    var alb = {
+      id: Store.uid("al"),
+      name: name.slice(0, 40),
+      cover: albumNew.cover || "",
+      discIds: [],
+      createdAt: Date.now()
+    };
+
+    disc.albums.push(alb);
+    Store.saveAlbums(disc.albums);
+
+    closeSheet("albumNewSheet");
+    renderAlbums();
+    toast("专辑已创建", 1500);
+  }
+
+  function openDiscBox() {
+    closeDrawer();
+    var el = $("discPage");
+    if (!el) return;
+    el.classList.add("open");
+    el.setAttribute("aria-hidden", "false");
+
+    Promise.all([Store.listMusic(), Store.listAlbums()]).then(function (res) {
+      disc.list = res[0] || [];
+      disc.albums = res[1] || [];
+      if (disc.cur < 0 && disc.list.length) disc.cur = 0;
+      renderDiscNowPlaying();
+      renderDiscList();
+      setDiscPlaying(disc.audio && !disc.audio.paused);
+    });
+  }
+
+  function closeDiscBox() {
+    var el = $("discPage");
+    if (!el) return;
+    el.classList.remove("open");
+    el.setAttribute("aria-hidden", "true");
+    // 音乐不停止，继续后台播放
+  }
+
+  function saveDiscItem(item) {
+    disc.list.push(item);
+    return Store.saveMusicIndex(disc.list).then(function () {
+      renderDiscNowPlaying();
+      renderDiscList();
+    });
+  }
+
+  function deleteDisc(discId) {
+    var item = null;
+    for (var di = 0; di < disc.list.length; di++) {
+      if (disc.list[di].id === discId) { item = disc.list[di]; break; }
+    }
+    if (!item) return;
+
+    confirmDialog("删除这张唱片？", "音频文件也会一起删除。", "删除").then(function (ok) {
+      if (!ok) return;
+
+      var curNow = curDisc();
+      if (curNow && curNow.id === discId) {
+        var a = discAudioEl();
+        a.pause();
+        a.removeAttribute("src");
+        setDiscPlaying(false);
+        releaseDiscUrl();
+      }
+
+      var realIdx = disc.list.indexOf(item);
+      if (realIdx >= 0) disc.list.splice(realIdx, 1);
+
+      var ctxNow = ctxList();
+      if (disc.cur >= ctxNow.length) disc.cur = Math.max(0, ctxNow.length - 1);
+
+      Store.delMusicAudio(item.id);
+      Store.saveMusicIndex(disc.list).then(function () {
+        renderDiscNowPlaying();
+        renderDiscList();
+      });
+    });
+  }
+
+  /* ---------- 添加唱片 ---------- */
+
+  function renderAlbumPick(selected) {
+    var box = $("discAlbumPick");
+    if (!box) return;
+
+    selected = selected || [];
+
+    if (!disc.albums.length) {
+      box.innerHTML = '<span class="album-chip" style="opacity:.5">还没有专辑，可以在右上角菜单里新建</span>';
+      return;
+    }
+
+    var html = "";
+    disc.albums.forEach(function (alb) {
+      var on = selected.indexOf(alb.id) !== -1 ? " on" : "";
+      html += '<button class="album-chip' + on + '" type="button" data-pickalbum="' + esc(alb.id) + '">' +
+        esc(alb.name) + "</button>";
+    });
+    box.innerHTML = html;
+  }
+
+  function openDiscAdd() {
+    disc.editingIndex = -1;
+    disc.pending = { audioFile: null, cover: null, bg: null, color: "", albumIds: [] };
+    renderAlbumPick([]);
+    $("discAudioName").textContent = "支持 mp3 / m4a / wav / ogg / flac 等";
+    if ($("discNameInput")) $("discNameInput").value = "";
+    if ($("discArtistInput")) $("discArtistInput").value = "";
+    $("discCoverPreview").src = DISC_COVER_DEFAULT;
+    $("discBgPreview").src = DISC_COVER_DEFAULT;
+    openSheet("discAddSheet");
+  }
+
+  function readImageForDisc(file, maxSide) {
+    return compressImage(file, maxSide || 1400, 0.88);
+  }
+
+  function savePendingDisc() {
+    // 编辑模式：不换音频
+    if (disc.editingIndex >= 0) {
+      saveDiscEdit();
+      return;
+    }
+
+    if (!disc.pending.audioFile) {
+      toast("先选一个音乐文件", 2200);
+      return;
+    }
+
+    var f = disc.pending.audioFile;
+    var id = Store.uid("m");
+
+    var nameInput = $("discNameInput");
+    var typed = nameInput ? nameInput.value.trim() : "";
+    var title = typed || f.name.replace(/\.[^.]+$/, "").slice(0, 60) || "未命名唱片";
+
+    var artistInput = $("discArtistInput");
+    var artist = artistInput ? artistInput.value.trim().slice(0, 40) : "";
+
+    Store.putMusicAudio(id, f).then(function (ok) {
+      if (!ok) { toast("保存音频失败（空间不足？）", 2600); return; }
+
+      return saveDiscItem({
+        id: id,
+        title: title,
+        artist: artist,
+        color: disc.pending.color || "",
+        cover: disc.pending.cover || "",
+        bg: disc.pending.bg || "",
+        albumIds: disc.pending.albumIds || [],
+        recorded: false,
+        createdAt: Date.now()
+      }).then(function () {
+        closeSheet("discAddSheet");
+        if (disc.cur < 0) playDisc(0);
+        toast("已加入唱片箱", 1600);
+      });
+    });
+  }
+
+  /* ---------- 录音成唱片 ---------- */
+  function startDiscRecord() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast("这台设备不支持录音", 2400);
+      return;
+    }
+
+    disc.recordMode = true;
+    disc.recordChunks = [];
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      disc.recordStream = stream;
+
+      var mime = "";
+      var cands = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+      for (var i = 0; i < cands.length; i++) {
+        try {
+          if (!MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(cands[i])) { mime = cands[i]; break; }
+        } catch (e) { }
+      }
+
+      var rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      disc.recorder = rec;
+
+      rec.ondataavailable = function (e) {
+        if (e.data && e.data.size) disc.recordChunks.push(e.data);
+      };
+
+      rec.onstop = function () {
+        var blob = new Blob(disc.recordChunks, { type: rec.mimeType || "audio/webm" });
+        disc.recordChunks = [];
+
+        if (disc.recordStream) {
+          disc.recordStream.getTracks().forEach(function (t) { t.stop(); });
+          disc.recordStream = null;
+        }
+        disc.recorder = null;
+
+        if (blob.size < 1200) { toast("没录到声音", 2200); return; }
+
+        var id = Store.uid("m");
+        Store.putMusicAudio(id, blob).then(function (ok) {
+          if (!ok) { toast("保存录音失败", 2600); return; }
+          return saveDiscItem({
+            id: id,
+            title: "录音 " + new Date().toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }),
+            cover: "",
+            bg: "",
+            recorded: true,
+            createdAt: Date.now()
+          });
+        }).then(function () {
+          toast("录音已加入唱片箱", 1800);
+        });
+      };
+
+      rec.start();
+      toast("开始录音，再点一次结束", 2600);
+
+      var btn = $("btnDiscRecord");
+      if (btn) btn.classList.add("recording");
+    }).catch(function () {
+      disc.recordMode = false;
+      toast("麦克风权限被拒绝", 2600);
+    });
+  }
+
+  function stopDiscRecord() {
+    if (disc.recorder && disc.recorder.state !== "inactive") {
+      try { disc.recorder.stop(); } catch (e) { }
+    }
+    disc.recordMode = false;
+
+    var btn = $("btnDiscRecord");
+    if (btn) btn.classList.remove("recording");
+  }
+
   /* ==================================================================
      语音输入：长按输入框录音，松手转成文字
      ================================================================== */
@@ -1258,6 +2760,13 @@
 
   function startVoice() {
     if (voiceState.busy) return;
+
+    // 长按说话时先暂停唱片，松手再继续
+    if (disc.audio && !disc.audio.paused) {
+      disc.wasPlaying = true;
+      disc.audio.pause();
+      setDiscPlaying(false);
+    }
     if (!voiceSupported()) {
       toast("这台设备不支持录音", 2600);
       return;
@@ -1343,6 +2852,12 @@
 
   function stopVoice() {
     voiceState.holding = false;
+
+    // 松手后把唱片接着放
+    if (disc.wasPlaying && disc.audio) {
+      disc.wasPlaying = false;
+      disc.audio.play().then(function () { setDiscPlaying(true); }).catch(function () { });
+    }
     if (voiceState.rec && voiceState.rec.state !== "inactive") {
       try { voiceState.rec.stop(); } catch (e) { }
       voiceState.rec = null;
@@ -3180,6 +4695,384 @@
     });
 
     // ---------- 搜索 / 收藏 ----------
+
+    // ---------- 唱片箱 ----------
+    $("btnDiscBox").addEventListener("click", openDiscBox);
+
+    // ---------- 专辑 ----------
+    $("btnDiscAlbums").addEventListener("click", openAlbums);
+    $("btnAlbumClose").addEventListener("click", function () { closeSheet("albumSheet"); });
+    $("btnAlbumNew").addEventListener("click", openAlbumNew);
+    $("btnAlbumNewClose").addEventListener("click", function () { closeSheet("albumNewSheet"); });
+    $("btnAlbumCreate").addEventListener("click", createAlbum);
+
+    $("btnAlbumSort").addEventListener("click", function () {
+      disc.sortDesc = !disc.sortDesc;
+      this.textContent = "全部唱片：" + (disc.sortDesc ? "新的在前" : "旧的在前");
+      if (disc.context === "all") {
+        disc.cur = 0;
+        renderDiscNowPlaying();
+        renderDiscList();
+      }
+      toast(disc.sortDesc ? "新的在前" : "旧的在前", 1400);
+    });
+
+    $("albumList").addEventListener("click", function (e) {
+      var covBtn = e.target.closest ? e.target.closest("[data-albumcover]") : null;
+      if (covBtn) {
+        e.stopPropagation();
+        editAlbumCover(covBtn.getAttribute("data-albumcover"));
+        return;
+      }
+
+      var delBtn = e.target.closest ? e.target.closest("[data-albumdel]") : null;
+      if (delBtn) {
+        e.stopPropagation();
+        var aid = delBtn.getAttribute("data-albumdel");
+        disc.albums = disc.albums.filter(function (x) { return x.id !== aid; });
+        Store.saveAlbums(disc.albums);
+        if (disc.context === aid) disc.context = "all";
+        renderAlbums();
+        toast("专辑已删除", 1400);
+        return;
+      }
+
+      var item = e.target.closest ? e.target.closest("[data-album]") : null;
+      if (!item) return;
+      switchAlbum(item.getAttribute("data-album"));
+    });
+
+    $("albumEditCoverFile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      this.value = "";
+      if (!f) return;
+      try { openCropper(f, "albumCover"); } catch (err) { toast("打开裁剪失败", 2000); }
+    });
+
+    $("btnAlbumCover").addEventListener("click", function () { $("albumCoverFile").click(); });
+    $("albumCoverFile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      this.value = "";
+      if (!f) return;
+      readImageForDisc(f, 600).then(function (url) {
+        albumNew.cover = url;
+        if ($("albumCoverPreview")) $("albumCoverPreview").src = url;
+      }).catch(function () { toast("封面读取失败", 2000); });
+    });
+
+    // 点唱片 → 歌词；再点空白 → 回唱片
+    $("discVinyl").addEventListener("click", function (e) {
+      e.stopPropagation();
+      openLyric();
+    });
+    $("discPage").addEventListener("click", function (e) {
+      if (!lyric.open) return;
+      // 点这些区域不触发返回
+      if (e.target.closest && e.target.closest(
+        ".disc-meta, .disc-tools, .disc-progress, .disc-controls, .disc-head, .disc-drawer, .sheet, .lyric-hint"
+      )) return;
+      closeLyric();
+    });
+
+    // 歌词态点顶部标题也能回去
+    $("discHeadTitle").addEventListener("click", function () {
+      if (lyric.open) closeLyric();
+    });
+
+    // 「译」→ 开关译文显示
+    $("btnLyricTrans").addEventListener("click", function (e) {
+      e.stopPropagation();
+      lyric.showTrans = !lyric.showTrans;
+      $("btnLyricTrans").classList.toggle("on", lyric.showTrans);
+      renderLyric();
+      toast(lyric.showTrans ? "显示译文" : "隐藏译文", 1200);
+    });
+
+    // 「…」→ 歌词设置菜单
+    $("btnLyricMore").addEventListener("click", function (e) {
+      e.stopPropagation();
+      openSheet("lyricMenuSheet");
+    });
+
+    $("btnLyricMenuClose").addEventListener("click", function () { closeSheet("lyricMenuSheet"); });
+    $("btnLyricStampMode").addEventListener("click", startStampMode);
+    $("btnLyricTransEdit").addEventListener("click", function () {
+      closeSheet("lyricMenuSheet");
+      openTransEditor();
+    });
+    $("lyricBright").addEventListener("input", function () {
+      var v = parseInt(this.value, 10) / 100;
+      applyLyricBrightness(v);
+      settings.lyricBrightness = v;
+      Store.save();
+    });
+
+    $("btnTransClose").addEventListener("click", function () { closeSheet("transSheet"); });
+    $("btnTransSave").addEventListener("click", saveTrans);
+
+    $("lyricBody").addEventListener("click", function (e) {
+      if (!lyric.stampMode) return;
+      var line = e.target.closest ? e.target.closest("[data-li]") : null;
+      if (!line) return;
+      e.stopPropagation();
+      stampLine(parseInt(line.getAttribute("data-li"), 10));
+    });
+    $("btnLyricSheetClose").addEventListener("click", closeLeSheet);
+    $("btnLyricSave").addEventListener("click", saveLe);
+
+    $("lePlay").addEventListener("click", function (e) {
+      e.stopPropagation();
+      toggleLePlay();
+    });
+
+    $("leSeek").addEventListener("input", function () {
+      var a = discAudioEl();
+      if (!a.duration) return;
+      a.currentTime = this.value / 1000 * a.duration;
+      syncLePlayer();
+    });
+
+    // 删时间戳 / 补时间戳
+    $("leLines").addEventListener("click", function (e) {
+      var del = e.target.closest ? e.target.closest("[data-stampdel]") : null;
+      if (del) {
+        e.stopPropagation();
+        var di = parseInt(del.getAttribute("data-stampdel"), 10);
+        if (le.rows[di]) le.rows[di].t = -1;
+        renderLeLines();
+        return;
+      }
+
+      var add = e.target.closest ? e.target.closest("[data-stampadd]") : null;
+      if (add) {
+        e.stopPropagation();
+        var ai = parseInt(add.getAttribute("data-stampadd"), 10);
+        if (le.rows[ai]) {
+          le.rows[ai].t = disc.audio ? disc.audio.currentTime : 0;
+          renderLeLines();
+        }
+      }
+    });
+
+    // 行文字
+    $("leLines").addEventListener("input", function (e) {
+      var inp = e.target.closest ? e.target.closest("[data-letext]") : null;
+      if (!inp) return;
+      var i = parseInt(inp.getAttribute("data-letext"), 10);
+      if (le.rows[i]) le.rows[i].text = inp.value;
+    });
+
+    // 整段粘贴 → 重新解析成行
+    $("lyricInput").addEventListener("input", function () {
+      var rows = parseLrc(this.value);
+      if (rows.length) {
+        le.rows = rows.map(function (l) { return { t: l.t, text: l.text }; });
+        renderLeLines();
+      }
+    });
+
+    $("lyricBody").addEventListener("click", function (e) {
+      var line = e.target.closest ? e.target.closest("[data-li]") : null;
+      if (!line) return;
+      if (!lyric.stampMode) return;
+      stampLine(parseInt(line.getAttribute("data-li"), 10));
+    });
+    $("btnDiscBack").addEventListener("click", closeDiscBox);
+
+    $("btnDiscList").addEventListener("click", function () {
+      var el = $("discList");
+      el.hidden = !el.hidden;
+      if (!el.hidden) renderDiscList();
+    });
+    $("btnDiscListClose").addEventListener("click", function () {
+      $("discList").hidden = true;
+    });
+
+    $("btnDiscPlay").addEventListener("click", toggleDiscPlay);
+
+    $("btnDiscPrev").addEventListener("click", function () {
+      var list = ctxList();
+      if (list.length < 2) { toggleDiscPlay(); return; }
+      playDisc((disc.cur - 1 + list.length) % list.length);
+    });
+
+    $("btnDiscNext").addEventListener("click", function () {
+      var list = ctxList();
+      if (list.length < 2) { toggleDiscPlay(); return; }
+      playDisc((disc.cur + 1) % list.length);
+    });
+
+    $("discSeek").addEventListener("input", function () {
+      var a = discAudioEl();
+      if (!a.duration) return;
+      a.currentTime = this.value / 1000 * a.duration;
+    });
+
+    $("btnDiscAdd").addEventListener("click", openDiscAdd);
+    $("btnDiscAddClose").addEventListener("click", function () { closeSheet("discAddSheet"); });
+
+    $("btnPickAudio").addEventListener("click", function () { $("discAudioFile").click(); });
+    $("discAudioFile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      if (!f) return;
+      var self = this;
+
+      // 网易云 ncm：先解密成原始 mp3 / flac
+      if (/\.ncm$/i.test(f.name)) {
+        if (!window.NCM) { toast("ncm 解密模块没加载", 2600); return; }
+
+        $("discAudioName").textContent = "正在解密 ncm…";
+        f.arrayBuffer().then(function (buf) {
+          return NCM.decrypt(buf);
+        }).then(function (res) {
+          var base = f.name.replace(/\.ncm$/i, "");
+          var meta = res.meta || {};
+
+          var title = meta.musicName || base;
+
+          // ncm 里的 artist 可能是 ["名字"] 或 [["名字", id], ...]
+          // 多个作者用 / 连接
+          var artist = "";
+          if (Array.isArray(meta.artist) && meta.artist.length) {
+            artist = meta.artist.map(function (x) {
+              return Array.isArray(x) ? String(x[0] || "") : String(x || "");
+            }).filter(Boolean).join("/");
+          } else if (typeof meta.artist === "string") {
+            artist = meta.artist;
+          }
+
+          var outName = title + "." + res.ext;
+          disc.pending.audioFile = new File([res.blob], outName, { type: res.mime });
+
+          var info = "（已从 ncm 解密";
+          if (meta.bitrate) info += "，" + Math.round(meta.bitrate / 1000) + "kbps";
+          info += "）";
+
+          $("discAudioName").textContent = outName + info;
+          if ($("discNameInput") && !$("discNameInput").value) $("discNameInput").value = title;
+          if ($("discArtistInput") && !$("discArtistInput").value && artist) $("discArtistInput").value = artist;
+
+          // ncm 里自带的专辑封面（已转成 data URL）
+          if (res.cover) {
+            disc.pending.cover = res.cover;
+            $("discCoverPreview").src = res.cover;
+          }
+        }).catch(function (err) {
+          $("discAudioName").textContent = "ncm 解密失败";
+          toast(err && err.message ? err.message : "ncm 解密失败", 3600);
+        }).then(function () {
+          setTimeout(function () { try { self.value = ""; } catch (e) { } }, 400);
+        });
+        return;
+      }
+
+      // accept 放开了，这里判断一下是不是音频
+      var looksAudio = /^audio\//.test(f.type) ||
+        /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac|weba|wma|ape|aiff|amr|mid|midi)$/i.test(f.name);
+
+      if (!looksAudio) {
+        toast("请选择音频文件（这个看起来不是）", 2600);
+        return;
+      }
+
+      disc.pending.audioFile = f;
+      $("discAudioName").textContent = f.name + "（" + (f.size / 1024 / 1024).toFixed(1) + " MB）";
+
+      // 延迟清空：部分安卓 WebView 立刻清空会让下一次选择失效
+      setTimeout(function () { try { self.value = ""; } catch (e) { } }, 400);
+    });
+
+    $("btnPickCover").addEventListener("click", function () { $("discCoverFile").click(); });
+    $("discCoverFile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      if (!f) return;
+      var selfC = this;
+      // 走裁剪器：1:1 方形，用户可自行调整范围
+      try { openCropper(f, "discCover"); } catch (e) { toast("打开裁剪失败", 2200); }
+      setTimeout(function () { try { selfC.value = ""; } catch (e) { } }, 400);
+    });
+
+    $("btnDiscPickBg").addEventListener("click", function () { $("discBgFile").click(); });
+    $("discBgFile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      if (!f) return;
+      var selfB = this;
+      // 走裁剪器：16:9 横图
+      try { openCropper(f, "discBg"); } catch (e) { toast("打开裁剪失败", 2200); } 
+      setTimeout(function () { try { selfB.value = ""; } catch (e) { } }, 400);
+    });
+
+    $("discAlbumPick").addEventListener("click", function (e) {
+      var chip = e.target.closest ? e.target.closest("[data-pickalbum]") : null;
+      if (!chip) return;
+
+      var id = chip.getAttribute("data-pickalbum");
+      var list = disc.pending.albumIds || (disc.pending.albumIds = []);
+      var at = list.indexOf(id);
+      if (at === -1) list.push(id);
+      else list.splice(at, 1);
+
+      renderAlbumPick(list);
+    });
+
+    $("btnDiscSave").addEventListener("click", savePendingDisc);
+
+    $("btnDiscMode").addEventListener("click", cycleDiscMode);
+    $("btnDiscLike").addEventListener("click", toggleDiscLike);
+    $("btnDiscComment").addEventListener("click", openDiscComments);
+    $("btnDiscCommentClose").addEventListener("click", function () {
+      $("discComments").hidden = true;
+    });
+    $("btnDiscCommentSend").addEventListener("click", sendDiscComment);
+    $("btnInviteComment").addEventListener("click", openInvitePicker);
+    $("btnEditProfile").addEventListener("click", openProfileEdit);
+    $("btnProfileClose").addEventListener("click", function () { closeSheet("profileSheet"); });
+    $("btnProfileSave").addEventListener("click", saveProfile);
+    $("btnProfileAvatar").addEventListener("click", function () { $("profileAvatarFile").click(); });
+    $("profileAvatarFile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      this.value = "";
+      if (!f) return;
+      try { openCropper(f, "profile"); } catch (e) { toast("打开裁剪失败", 2000); }
+    });
+    $("btnInviteClose").addEventListener("click", function () {
+      closeSheet("inviteSheet");
+      openDiscComments();
+    });
+
+    $("inviteList").addEventListener("click", function (e) {
+      var it = e.target.closest ? e.target.closest("[data-invite]") : null;
+      if (!it) return;
+      inviteToSession(it.getAttribute("data-invite"));
+    });
+
+    $("btnDiscRecord").addEventListener("click", function () {
+      if (disc.recordMode) stopDiscRecord();
+      else startDiscRecord();
+    });
+
+    $("discListBody").addEventListener("click", function (e) {
+      var edit = e.target.closest ? e.target.closest("[data-dedit]") : null;
+      if (edit) {
+        e.stopPropagation();
+        openDiscEdit(edit.getAttribute("data-dedit"));
+        return;
+      }
+
+      var del = e.target.closest ? e.target.closest("[data-ddel]") : null;
+      if (del) {
+        e.stopPropagation();
+        deleteDisc(del.getAttribute("data-ddel"));
+        return;
+      }
+
+      var row = e.target.closest ? e.target.closest("[data-di]") : null;
+      if (!row) return;
+      e.stopPropagation();
+      playDisc(parseInt(row.getAttribute("data-di"), 10));
+      $("discList").hidden = true;
+    });
+
     // ---------- 批量管理 ----------
     $("btnBulk").addEventListener("click", function () { setBulkMode(!bulkMode); });
 
@@ -3405,11 +5298,43 @@
   var cropMode = "avatar";
 
   function openCropper(file, mode) {
-    cropMode = (mode === "background") ? "background" : "avatar";
+    cropMode = (mode === "background") ? "background"
+      : (mode === "discCover") ? "discCover"
+      : (mode === "discBg") ? "discBg"
+      : (mode === "albumCover") ? "albumCover"
+      : (mode === "profile") ? "profile"
+      : "avatar";
+
+    var cropTitles = {
+      avatar: "调整头像",
+      background: "调整聊天背景",
+      discCover: "调整唱片图片",
+      discBg: "调整唱片背景",
+      albumCover: "调整专辑封面",
+      profile: "调整我的头像"
+    };
+    if ($("cropTitle")) $("cropTitle").textContent = cropTitles[cropMode] || "调整图片";
 
     // 先定取景框尺寸（背景是竖屏矩形，头像是不带圆角的方形）
     var vp = $("cropViewport");
-    if (cropMode === "background") {
+
+    if (cropMode === "discBg") {
+      // 唱片背景：竖屏矩形（和手机屏幕一致）
+      vp.classList.add("rect");
+      var bmaxW = Math.min(window.innerWidth * 0.62, 260);
+      var bmaxH = window.innerHeight * 0.5;
+      var bratio = 1.55;                       // 常见手机竖屏比例
+      var bw = bmaxW;
+      var bh = bw * bratio;
+      if (bh > bmaxH) { bh = bmaxH; bw = bh / bratio; }
+      vp.style.width = Math.round(bw) + "px";
+      vp.style.height = Math.round(bh) + "px";
+    } else if (cropMode === "discCover" || cropMode === "albumCover" || cropMode === "profile") {
+      // 唱片/专辑封面：正方形（同头像）
+      vp.classList.remove("rect");
+      vp.style.width = "";
+      vp.style.height = "";
+    } else if (cropMode === "background") {
       vp.classList.add("rect");
       var ratio = $chat.clientHeight / Math.max(1, $chat.clientWidth);
       ratio = Math.min(2.3, Math.max(1.2, ratio || 1.8));
@@ -3485,10 +5410,16 @@
     var st = cropState;
     if (!st.img) return;
 
-    // 头像输出 256×256；背景按取景框比例输出 720 宽的竖图
     var isBg = cropMode === "background";
-    var W = isBg ? 720 : 256;
-    var H = isBg ? Math.round(W * (st.vh / Math.max(1, st.vw))) : 256;
+    var isDiscCover = cropMode === "discCover";
+    var isDiscBg = cropMode === "discBg";
+
+    // 头像 256；聊天背景 720 宽竖图；唱片封面 512 方形；唱片背景 1280×720
+    var W, H;
+    if (isDiscBg) { W = 720; H = 1120; }
+    else if (isDiscCover || cropMode === "albumCover" || cropMode === "profile") { W = 512; H = 512; }
+    else if (isBg) { W = 720; H = Math.round(W * (st.vh / Math.max(1, st.vw))); }
+    else { W = 256; H = 256; }
 
     var canvas = document.createElement("canvas");
     canvas.width = W;
@@ -3522,6 +5453,41 @@
       dataUrl = canvas.toDataURL("image/jpeg", isBg ? 0.82 : 0.86);
     } catch (e) {
       toast("图片处理失败");
+      return;
+    }
+
+    if (cropMode === "profile") {
+      closeCropper();
+      profileEdit.avatar = dataUrl;
+      if ($("profileAvatarPreview")) $("profileAvatarPreview").src = dataUrl;
+      return;
+    }
+
+    if (cropMode === "albumCover") {
+      closeCropper();
+      var alb = albumById(albumEditingId);
+      if (alb) {
+        alb.cover = dataUrl;
+        Store.saveAlbums(disc.albums);
+        renderAlbums();
+        toast("专辑封面已更新", 1400);
+      }
+      albumEditingId = null;
+      return;
+    }
+
+    if (isDiscCover || isDiscBg) {
+      closeCropper();
+      if (isDiscCover) {
+        disc.pending.cover = dataUrl;
+        if ($("discCoverPreview")) $("discCoverPreview").src = dataUrl;
+        dominantColor(dataUrl).then(function (col) {
+          if (col) disc.pending.color = col;
+        });
+      } else {
+        disc.pending.bg = dataUrl;
+        if ($("discBgPreview")) $("discBgPreview").src = dataUrl;
+      }
       return;
     }
 
@@ -4885,6 +6851,8 @@
   /* ==================================================================
      原生外壳（安卓返回键）
      ================================================================== */
+  var backPressedAt = 0;
+
   function setupNativeBack() {
     if (!isNative()) return;
     try {
@@ -4914,6 +6882,35 @@
           closeSettings();
           return;
         }
+        // 从搜索/收藏跳过来的，先原路返回
+        if (typeof returnTo !== "undefined" && returnTo) {
+          var backTo = returnTo;
+          returnTo = null;
+          updateMenuButton();
+          if (backTo === "search") openSearch(true);
+          else if (backTo === "favs") openFavs(true);
+          return;
+        }
+        if ($("searchPage").classList.contains("open")) {
+          closeSearch();
+          return;
+        }
+        if ($("favPage").classList.contains("open")) {
+          closeFavs();
+          return;
+        }
+
+        // 唱片箱：先关内层，再关页面
+        if ($("discPage").classList.contains("open")) {
+          if ($("discAddSheet").classList.contains("open")) { closeSheet("discAddSheet"); return; }
+          if ($("lyricSheet").classList.contains("open")) { closeSheet("lyricSheet"); return; }
+          if ($("discPage").classList.contains("show-lyric")) { closeLyric(); return; }
+          if ($("discComments") && !$("discComments").hidden) { $("discComments").hidden = true; return; }
+          if ($("discList") && !$("discList").hidden) { $("discList").hidden = true; return; }
+          closeDiscBox();
+          return;
+        }
+
         if ($("drawer").classList.contains("open")) {
           closeDrawer();
           return;
@@ -4922,7 +6919,15 @@
           stopGeneration();
           return;
         }
-        try { AppPlugin.exitApp(); } catch (e) { }
+
+        // 再按一次才真的退出
+        var now = Date.now();
+        if (now - backPressedAt < 2000) {
+          try { AppPlugin.exitApp(); } catch (e) { }
+          return;
+        }
+        backPressedAt = now;
+        toast("再按一次返回键退出 DeepFish", 2000);
       });
     } catch (e) { /* 插件不存在时忽略 */ }
   }
@@ -4978,6 +6983,7 @@
       snapToBottom();
       bindEvents();
       setupNativeBack();
+      loadLyricBrightness();
       checkNotice();
       renderAttachments();
 

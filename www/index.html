@@ -139,12 +139,17 @@
     <div class="drawer-brand">
       <img src="icons/avatar-256.png" alt="" class="brand-avatar" id="brandAvatar">
       <div>
-        <div class="brand-name">DeepFish</div>
+        <div class="brand-name">
+          DeepFish
+          <button class="brand-fav" id="btnFavOpen" type="button" aria-label="收藏夹">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 10.2l5.4-.8z"/></svg>
+          </button>
+        </div>
         <div class="brand-sub" id="brandSub">DeepSeek 手机助手</div>
       </div>
     </div>
-    <button class="icon-btn ghost" id="btnFavOpen" type="button" aria-label="收藏夹">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 10.2l5.4-.8z"/></svg>
+    <button class="disc-btn" id="btnDiscBox" type="button" aria-label="唱片箱">
+      <img src="icons/disc-default.jpg" alt="" id="discBtnCover">
     </button>
     <button class="icon-btn ghost" id="btnDrawerClose" type="button" aria-label="关闭">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -187,6 +192,348 @@
     </button>
   </div>
 </aside>
+
+
+<!-- ============ 唱片箱 ============ -->
+<section class="disc-page" id="discPage" aria-hidden="true">
+  <div class="disc-bg" id="discBg"></div>
+
+  <header class="disc-head">
+    <button class="icon-btn" id="btnDiscBack" type="button" aria-label="收起">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <div class="disc-head-title" id="discHeadTitle">
+      <span class="dht-main" id="dhtMain">唱片箱</span>
+      <span class="dht-sub" id="dhtSub"></span>
+    </div>
+    <button class="icon-btn" id="btnDiscList" type="button" aria-label="唱片列表">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+  </header>
+
+  <div class="disc-stage">
+    <div class="disc-arm"></div>
+
+    <!-- 歌词层：和唱片共用同一块区域，点击互相切换 -->
+    <div class="lyric-layer" id="lyricLayer">
+      <div class="lyric-body" id="lyricBody"></div>
+    </div>
+
+    <div class="disc-vinyl" id="discVinyl">
+      <div class="disc-grooves"></div>
+      <img id="discCover" class="disc-cover" src="icons/disc-default.jpg" alt="">
+    </div>
+  </div>
+
+  <div class="disc-info-row">
+    <div class="disc-meta">
+      <div class="disc-song" id="discSongName">唱片箱</div>
+      <div class="disc-sub" id="discSongSub">添加一首歌，或者录一段声音</div>
+    </div>
+
+    <div class="disc-tools">
+      <button class="disc-tool" id="btnLyricTrans" type="button" hidden>译</button>
+      <button class="disc-tool" id="btnLyricMore" type="button" hidden>…</button>
+      <button class="disc-mini" id="btnDiscLike" type="button" aria-label="喜欢">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.6-7-9.6A4.4 4.4 0 0112 7a4.4 4.4 0 017 3.4C19 15.4 12 20 12 20z"/></svg>
+      </button>
+      <button class="disc-mini" id="btnDiscComment" type="button" aria-label="评论">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="disc-progress">
+    <input type="range" id="discSeek" min="0" max="1000" value="0" step="1">
+    <div class="disc-times">
+      <span id="discCur">00:00</span>
+      <span id="discDur">00:00</span>
+    </div>
+  </div>
+
+  <div class="disc-controls">
+    <button class="disc-ctl" id="btnDiscPrev" type="button" aria-label="上一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14M19 5l-9 7 9 7z"/></svg>
+    </button>
+    <button class="disc-ctl main" id="btnDiscPlay" type="button" aria-label="播放">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>
+    </button>
+    <button class="disc-ctl" id="btnDiscNext" type="button" aria-label="下一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5v14M5 5l9 7-9 7z"/></svg>
+    </button>
+    <button class="disc-ctl small" id="btnDiscMode" type="button" aria-label="播放模式">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V7h12l-3-3M20 15v2H8l3 3"/></svg>
+    </button>
+  </div>
+
+
+
+  <!-- 唱片抽屉列表 -->
+  <div class="disc-drawer" id="discList" hidden>
+    <div class="disc-drawer-head">
+      <span>我的唱片</span>
+      <button class="icon-btn ghost" id="btnDiscListClose" type="button" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="disc-drawer-actions">
+      <button class="disc-act" id="btnDiscAlbums" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        专辑
+      </button>
+      <button class="disc-act" id="btnDiscAdd" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        添加唱片
+      </button>
+      <button class="disc-act" id="btnDiscRecord" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="8"/></svg>
+        录音
+      </button>
+    </div>
+    <div class="disc-drawer-body" id="discListBody"></div>
+  </div>
+
+  <!-- 评论 -->
+  <div class="disc-drawer" id="discComments" hidden>
+    <div class="disc-drawer-head">
+      <span id="discCommentTitle">评论</span>
+      <button class="icon-btn ghost" id="btnDiscCommentClose" type="button" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="disc-me">
+      <button class="disc-me-btn" id="btnEditProfile" type="button">
+        <img id="discMeAvatar" src="icons/user-default.png" alt="">
+        <span id="discMeName">User</span>
+        <svg class="me-edit" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18 10a2.8 2.8 0 10-4-4L4 16z"/></svg>
+      </button>
+    </div>
+    <div class="disc-drawer-body" id="discCommentBody"></div>
+    <div class="disc-comment-input">
+      <input class="text-input" id="discCommentInput" type="text" placeholder="说点什么…" maxlength="200" autocomplete="off">
+      <button class="wide-btn primary" id="btnDiscCommentSend" type="button">发送</button>
+    </div>
+    <div class="disc-comment-invite">
+      <button class="wide-btn" id="btnInviteComment" type="button">邀请他过来评论</button>
+    </div>
+  </div>
+</section>
+
+
+<!-- 歌词编辑（带播放进度条与时间戳录入） -->
+<section class="sheet" id="lyricSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnLyricSheetClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">编辑歌词</div>
+    <button class="le-save" id="btnLyricSave" type="button">保存</button>
+  </div>
+
+  <div class="sheet-body le-body">
+    <div class="le-player">
+      <input type="range" id="leSeek" min="0" max="1000" value="0" step="1">
+      <div class="le-row">
+        <span class="le-time" id="leCur">00:00</span>
+        <button class="le-play" id="lePlay" type="button" aria-label="播放">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>
+        </button>
+        <span class="le-time" id="leDur">00:00</span>
+      </div>
+    </div>
+
+    <div class="field-tip">
+      播放到想要的位置后按暂停，时间戳会自动加到最后一行；每一行的时间戳都可以点 × 删掉。
+    </div>
+
+    <div class="le-lines" id="leLines"></div>
+
+    <div class="group-title">整段粘贴（可选）</div>
+    <textarea class="lyric-textarea" id="lyricInput" placeholder="[00:12.50]第一句&#10;[00:18.00]第二句" spellcheck="false"></textarea>
+  </div>
+</section>
+
+<!-- 歌词选项 -->
+<section class="sheet" id="lyricMenuSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnLyricMenuClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">歌词设置</div>
+  </div>
+  <div class="sheet-body">
+    <button class="wide-btn primary" id="btnLyricStampMode" type="button">设置歌词时间戳</button>
+    <div class="field-tip">打开后，点某一行歌词就会把「当前播放时间」写进去，音乐唱到那一行时它会自动滚到中间并放大。</div>
+    <div style="height:10px"></div>
+    <button class="wide-btn" id="btnLyricTransEdit" type="button">编辑译文</button>
+    <div class="field-tip">按行对应，一行原文一行译文即可。</div>
+
+    <div class="group-title">背景亮度</div>
+    <div class="lyric-bright-row">
+      <span class="lb-ico">🌑</span>
+      <input type="range" id="lyricBright" min="20" max="100" value="55" step="1">
+      <span class="lb-ico">☀️</span>
+    </div>
+    <div class="field-tip">调高能看到更多封面细节，调低更专注歌词。</div>
+  </div>
+</section>
+
+<!-- 译文编辑 -->
+<section class="sheet" id="transSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnTransClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">编辑译文</div>
+  </div>
+  <div class="sheet-body">
+    <div class="field-tip">和歌词一一对应，直接粘贴译文（不带时间戳）</div>
+    <textarea class="lyric-textarea" id="transInput" placeholder="从未如此感到糟糕&#10;我们置身于谎言之中却没有察觉" spellcheck="false"></textarea>
+    <div class="svc-actions">
+      <button class="wide-btn primary" id="btnTransSave" type="button">保存译文</button>
+    </div>
+  </div>
+</section>
+
+
+<!-- 专辑列表 -->
+<section class="sheet" id="albumSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnAlbumClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">专辑</div>
+    <button class="le-save" id="btnAlbumNew" type="button">新建</button>
+  </div>
+  <div class="sheet-body">
+    <button class="album-sort" id="btnAlbumSort" type="button">全部唱片：新的在前</button>
+    <div class="album-list" id="albumList"></div>
+  </div>
+</section>
+
+<!-- 新建专辑 -->
+<section class="sheet" id="albumNewSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnAlbumNewClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">新建专辑</div>
+  </div>
+  <div class="sheet-body">
+    <div class="group-title">名称</div>
+    <input class="text-input" id="albumNameInput" type="text" placeholder="给这张专辑起个名字" maxlength="40" autocomplete="off">
+    <div class="group-title">封面 <span class="opt">可选</span></div>
+    <div class="disc-pick-row">
+      <button class="disc-pick" id="btnAlbumCover" type="button">
+        <img id="albumCoverPreview" src="icons/disc-default.jpg" alt="">
+      </button>
+      <div class="disc-pick-tip">不选就用默认唱片图</div>
+    </div>
+    <input id="albumCoverFile" type="file" accept="image/*" hidden>
+    <input id="albumEditCoverFile" type="file" accept="image/*" hidden>
+    <div class="svc-actions">
+      <button class="wide-btn primary" id="btnAlbumCreate" type="button">创建专辑</button>
+    </div>
+  </div>
+</section>
+
+
+<!-- 邀请评论：选对话 -->
+<section class="sheet" id="inviteSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnInviteClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">邀请谁来评论</div>
+  </div>
+  <div class="sheet-body">
+    <div class="group-title">邀请词 <span class="opt">可选，会显示在评论区</span></div>
+    <textarea class="lyric-textarea invite-text" id="inviteText" placeholder="想对他说点什么，比如：帮我听听这首歌怎么样" spellcheck="false"></textarea>
+
+    <div class="invite-opts">
+      <label class="inv-opt"><input type="checkbox" id="inviteThink"> 深度思考</label>
+      <label class="inv-opt"><input type="checkbox" id="inviteSearch"> 联网搜索</label>
+    </div>
+    <div class="field-tip" id="inviteHint">选一个对话，那个对话里的角色会来写评论（Pro 模型不支持搜索）</div>
+
+    <div class="invite-list" id="inviteList"></div>
+  </div>
+</section>
+
+
+<!-- 我的资料 -->
+<section class="sheet" id="profileSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnProfileClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">我的资料</div>
+  </div>
+  <div class="sheet-body">
+    <div class="group-title">头像</div>
+    <div class="disc-pick-row">
+      <button class="disc-pick" id="btnProfileAvatar" type="button">
+        <img id="profileAvatarPreview" src="icons/user-default.png" alt="">
+      </button>
+      <div class="disc-pick-tip">点一下可以换头像，支持裁剪</div>
+    </div>
+    <input id="profileAvatarFile" type="file" accept="image/*" hidden>
+
+    <div class="group-title">名字</div>
+    <input class="text-input" id="profileNameInput" type="text" placeholder="User" maxlength="20" autocomplete="off">
+
+    <div class="svc-actions">
+      <button class="wide-btn primary" id="btnProfileSave" type="button">保存</button>
+    </div>
+  </div>
+</section>
+
+<!-- 添加唱片 -->
+<section class="sheet" id="discAddSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnDiscAddClose" type="button" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div class="sheet-title">添加唱片</div>
+  </div>
+  <div class="sheet-body">
+    <div class="group-title">唱片名</div>
+    <input class="text-input" id="discNameInput" type="text" placeholder="自动取文件名" maxlength="60" autocomplete="off">
+
+    <div class="group-title">作者</div>
+    <input class="text-input" id="discArtistInput" type="text" placeholder="可选，默认留空" maxlength="40" autocomplete="off">
+
+    <div class="group-title">音乐文件</div>
+    <button class="wide-btn primary" id="btnPickAudio" type="button">选择音乐文件</button>
+    <div class="field-tip" id="discAudioName">支持 mp3 / m4a / wav / ogg / flac 等</div>
+    <input id="discAudioFile" type="file" accept="*/*" hidden>
+
+    <div class="group-title">唱片图片 <span class="opt">可选</span></div>
+    <div class="disc-pick-row">
+      <button class="disc-pick" id="btnPickCover" type="button">
+        <img id="discCoverPreview" src="icons/disc-default.jpg" alt="">
+      </button>
+      <div class="disc-pick-tip">不选就用默认唱片</div>
+    </div>
+    <input id="discCoverFile" type="file" accept="image/*" hidden>
+
+    <div class="group-title">所属专辑 <span class="opt">可选</span></div>
+    <div class="album-pick" id="discAlbumPick"></div>
+
+    <div class="group-title">界面背景 <span class="opt">可选</span></div>
+    <div class="disc-pick-row">
+      <button class="disc-pick wide" id="btnDiscPickBg" type="button">
+        <img id="discBgPreview" src="icons/disc-default.jpg" alt="">
+      </button>
+      <div class="disc-pick-tip">每张唱片可以有自己的背景</div>
+    </div>
+    <input id="discBgFile" type="file" accept="image/*" hidden>
+
+    <div class="svc-actions">
+      <button class="wide-btn primary" id="btnDiscSave" type="button">保存到唱片箱</button>
+    </div>
+  </div>
+</section>
 
 <!-- ============ 搜索 ============ -->
 <section class="sheet" id="searchPage" aria-hidden="true">
@@ -339,7 +686,7 @@
     <button class="icon-btn ghost" id="btnCropCancel" type="button" aria-label="取消">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
     </button>
-    <h2>调整头像</h2>
+    <h2 id="cropTitle">调整头像</h2>
     <button class="crop-ok" id="btnCropOk" type="button">完成</button>
   </div>
 
@@ -565,6 +912,7 @@
 <script src="js/dszip.js"></script>
 <script src="js/store.js"></script>
 <script src="js/api.js"></script>
+<script src="js/ncm.js"></script>
 <script src="js/app.js"></script>
 
 <div class="img-viewer" id="imgViewer" hidden>
