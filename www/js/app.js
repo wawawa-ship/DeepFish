@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  var AppVersion = "1.25.12";
+  var AppVersion = "1.25.18";
   window.APP_VERSION = AppVersion;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -1573,13 +1573,13 @@
     return lines.join("\n");
   }
 
+  var pendingInvite = { sessionId: "", persona: null, model: "" };
+
   function openInvitePicker() {
     var item = curDisc();
     if (!item) { toast("先放一首歌吧", 1800); return; }
 
-    if ($("inviteText")) $("inviteText").value = "";
-    if ($("inviteThink")) $("inviteThink").checked = false;
-    if ($("inviteSearch")) $("inviteSearch").checked = false;
+    pendingInvite = { sessionId: "", persona: null, model: "" };
 
     var box = $("inviteList");
     if (!box) return;
@@ -1612,17 +1612,59 @@
     openSheet("inviteSheet");
   }
 
-  function inviteToSession(sessionId) {
-    var item = curDisc();
-    if (!item) return;
-
+  /* 第一步选中对话 → 第二步写字 */
+  function pickInviteSession(sessionId) {
     var ss = null;
     for (var i = 0; i < state.sessions.length; i++) {
       if (state.sessions[i].id === sessionId) { ss = state.sessions[i]; break; }
     }
     if (!ss) { toast("找不到这个对话", 2000); return; }
 
+    var persona = personaOf(ss);
+    var model = (ss.chat && ss.chat.model) || "deepseek-flash";
+
+    pendingInvite = { sessionId: ss.id, persona: persona, model: model };
+
+    // 第二步：显示选中的人和邀请词输入
+    if ($("inviteTarget")) {
+      $("inviteTarget").innerHTML =
+        '<img src="' + esc(avatarOf(persona)) + '" alt="">' +
+        '<div class="invite-target-main">' +
+        '<div class="invite-target-name">' + esc(persona.name || "助手") + "</div>" +
+        '<div class="invite-target-sub">' + esc(model === "deepseek-v4-pro" ? "Pro 模型" : "Flash 模型") +
+        " · " + esc(ss.title || "未命名对话") + "</div></div>";
+    }
+
+    // 沿用这个对话的开关状态
+    if ($("inviteThink")) $("inviteThink").checked = !!(ss.chat && ss.chat.thinking);
+    if ($("inviteSearch")) {
+      $("inviteSearch").checked = !!(ss.chat && ss.chat.webSearch) && model !== "deepseek-v4-pro";
+      $("inviteSearch").disabled = model === "deepseek-v4-pro";
+    }
+    if ($("inviteOptTip")) {
+      $("inviteOptTip").textContent = model === "deepseek-v4-pro"
+        ? "这个对话用的是 Pro 模型，不支持联网搜索"
+        : "默认沿用这个对话的设置，也可以临时改";
+    }
+
+    if ($("inviteText")) $("inviteText").value = "";
+
     closeSheet("inviteSheet");
+    openSheet("inviteWriteSheet");
+  }
+
+  /* 第二步：真正发送 */
+  function sendInvite() {
+    var item = curDisc();
+    if (!item) return;
+
+    var ss = null;
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === pendingInvite.sessionId) { ss = state.sessions[i]; break; }
+    }
+    if (!ss) { toast("找不到这个对话", 2000); return; }
+
+    closeSheet("inviteWriteSheet");
 
     var model = (ss.chat && ss.chat.model) || "deepseek-flash";
 
@@ -1636,17 +1678,24 @@
     }
 
     var persona = personaOf(ss);
-    var sys = "你是「" + (persona.name || "助手") + "」。";
 
     var userContent = invitePromptText(item);
     if (inviteText) {
       userContent += "\n\n【邀请人的话】\n" + inviteText;
     }
 
-    var messages = [
-      { role: "system", content: sys },
-      { role: "user", content: userContent }
-    ];
+    // 带上这个对话的完整上下文（角色卡 + 历史消息），
+    // 再把「邀请评论」作为新的一轮接在后面
+    var messages;
+    try {
+      messages = API.buildMessages(ss, settings) || [];
+    } catch (e) {
+      messages = [];
+    }
+    if (!messages.length) {
+      messages.push({ role: "system", content: "你是「" + (persona.name || "助手") + "」。" });
+    }
+    messages.push({ role: "user", content: userContent });
 
     toast("正在邀请「" + (persona.name || "他") + "」写评论…", 2600);
 
@@ -1661,12 +1710,26 @@
 
       // 1）先在聊天里建好这一轮（评论要用它的 id 做联动）
       var now = Date.now();
+
+      // 挂在「当前最后一条」下面，这样切换分支时它会跟着一起隐藏，
+      // 而不是像根节点那样永远可见
+      var lastTurn = ss.messages.length ? ss.messages[ss.messages.length - 1] : null;
+      var myBranch = null;
+      if (lastTurn) {
+        var lastEdit = lastTurn.edits[lastTurn.activeEdit || 0] || lastTurn.edits[0];
+        myBranch = {
+          turnId: lastTurn.id,
+          editIndex: lastTurn.activeEdit || 0,
+          replyIndex: lastEdit ? (lastEdit.activeReply || 0) : 0
+        };
+      }
+
       var turn = {
         id: Store.uid("t"),
         role: "user",
         createdAt: now,
         activeEdit: 0,
-        branch: null,
+        branch: myBranch,
         edits: [{
           id: Store.uid("e"),
           text: "【邀请评论】请评价《" + (item.title || "未命名") + "》",
@@ -1677,9 +1740,12 @@
           replies: [{
             id: Store.uid("r"),
             content: comment,
-            reasoning: "",
+            reasoning: reasoning || "",
             model: model,
-            createdAt: now + 1
+            createdAt: now + 1,
+            usage: res.usage || null,
+            cost: res.usage ? computeCost(model, res.usage, now) : null,
+            duration: 0
           }]
         }]
       };
@@ -3937,21 +4003,36 @@
           });
         }
 
-        s.messages.splice(f.index, 1);
+        // 这条消息以及它下面所有的子孙（分支链上的后代）一起删掉。
+        // 之前是把子节点挪回根分支，结果删了上面一条、下面的内容还留着，
+        // 评论也不会跟着消失——那就不是消息树了。
+        var deadIds = [deadId];
+        var grew = true;
+        var guardDel = 0;
+        while (grew && guardDel++ < 200) {
+          grew = false;
+          s.messages.forEach(function (t) {
+            if (t && t.branch && t.branch.turnId &&
+              deadIds.indexOf(t.branch.turnId) !== -1 &&
+              deadIds.indexOf(t.id) === -1) {
+              deadIds.push(t.id);
+              grew = true;
+            }
+          });
+        }
 
-        // 挂在被删消息下面的分支已经找不到父节点了，把它们挪回根分支，避免永久隐藏
-        s.messages.forEach(function (t) {
-          if (t.branch && t.branch.turnId === deadId) t.branch = null;
+        s.messages = (s.messages || []).filter(function (t) {
+          return deadIds.indexOf(t.id) === -1;
         });
 
-        // 如果这条消息是「邀请评论」的产物，把唱片箱里对应的评论一起删掉
+        // 这些消息对应的评论也一起删（唱片箱里不再显示）
         Store.listMusic().then(function (music) {
           var changed = false;
           (music || []).forEach(function (it) {
             if (!it || !Array.isArray(it.comments)) return;
             var before = it.comments.length;
             it.comments = it.comments.filter(function (c) {
-              return !(c && c.turnId === deadId);
+              return !(c && c.turnId && deadIds.indexOf(c.turnId) !== -1);
             });
             if (it.comments.length !== before) changed = true;
           });
@@ -5084,10 +5165,15 @@
       var i = parseInt(del.getAttribute("data-dc"), 10);
       if (!item.comments[i]) return;
 
-      item.comments.splice(i, 1);
-      Store.saveMusicIndex(disc.list);
-      renderDiscComments();
-      toast("评论已删除", 1200);
+      confirmDialog("确定要删除这条评论吗？", "只从评论区移除，聊天里的消息不受影响。", "删除")
+        .then(function (ok) {
+          if (!ok) return;
+          if (!item.comments[i]) return;
+          item.comments.splice(i, 1);
+          Store.saveMusicIndex(disc.list);
+          renderDiscComments();
+          toast("评论已删除", 1200);
+        });
     });
 
     $("btnInviteComment").addEventListener("click", openInvitePicker);
@@ -5109,7 +5195,14 @@
     $("inviteList").addEventListener("click", function (e) {
       var it = e.target.closest ? e.target.closest("[data-invite]") : null;
       if (!it) return;
-      inviteToSession(it.getAttribute("data-invite"));
+      pickInviteSession(it.getAttribute("data-invite"));
+    });
+
+    $("btnInviteSend").addEventListener("click", sendInvite);
+
+    $("btnInviteWriteBack").addEventListener("click", function () {
+      closeSheet("inviteWriteSheet");
+      openInvitePicker();
     });
 
     $("btnDiscRecord").addEventListener("click", function () {

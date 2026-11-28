@@ -268,8 +268,9 @@
       ? Store.visibleTurns(session)
       : (session.messages || []);
 
-    turns.forEach(function (turn) {
+    turns.forEach(function (turn, turnIdx) {
       if (!turn || !turn.edits || !turn.edits.length) return;
+      var isLastTurn = (turnIdx === turns.length - 1);
       var edit = turn.edits[turn.activeEdit] || turn.edits[0];
       if (!edit) return;
 
@@ -287,10 +288,15 @@
       });
 
       var reply = edit.replies[edit.activeReply] || edit.replies[0];
-      if (reply && reply.content && !reply.error) {
+      // 注意：即使正文为空也要进上下文（模型可能把内容全写进了思考），
+      // 否则上下文会缺一环。
+      // 但最后一轮的空回复不能发——那正是要模型生成的那条，
+      // 发了就会变成“最后一条是 assistant”，API 直接 400。
+      var skipEmptyLast = isLastTurn && reply && !reply.content && !reply.error;
+      if (reply && !reply.error && !skipEmptyLast) {
         flat.push({
           role: "assistant",
-          content: reply.content,
+          content: reply.content || "（这条回复没有正文）",
           reasoning: reply.reasoning,
           createdAt: reply.createdAt
         });

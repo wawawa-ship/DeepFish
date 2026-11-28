@@ -447,15 +447,7 @@
     <div class="sheet-title">邀请谁来评论</div>
   </div>
   <div class="sheet-body">
-    <div class="group-title">邀请词 <span class="opt">可选，会显示在评论区</span></div>
-    <textarea class="lyric-textarea invite-text" id="inviteText" placeholder="想对他说点什么，比如：帮我听听这首歌怎么样" spellcheck="false"></textarea>
-
-    <div class="invite-opts">
-      <label class="inv-opt"><input type="checkbox" id="inviteThink"> 深度思考</label>
-      <label class="inv-opt"><input type="checkbox" id="inviteSearch"> 联网搜索</label>
-    </div>
-    <div class="field-tip" id="inviteHint">选一个对话，那个对话里的角色会来写评论（Pro 模型不支持搜索）</div>
-
+    <div class="field-tip" id="inviteHint">选一个对话，下一步再写邀请词</div>
     <div class="invite-list" id="inviteList"></div>
   </div>
 </section>
@@ -484,6 +476,33 @@
 
     <div class="svc-actions">
       <button class="wide-btn primary" id="btnProfileSave" type="button">保存</button>
+    </div>
+  </div>
+</section>
+
+
+<!-- 邀请评论：第二步，写邀请词 -->
+<section class="sheet" id="inviteWriteSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="icon-btn" id="btnInviteWriteBack" type="button" aria-label="返回">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <div class="sheet-title">邀请评论</div>
+  </div>
+  <div class="sheet-body">
+    <div class="invite-target" id="inviteTarget"></div>
+
+    <div class="group-title">邀请词 <span class="opt">可选，会显示在评论区</span></div>
+    <textarea class="lyric-textarea invite-text" id="inviteText" placeholder="想对他说点什么，比如：帮我听听这首歌怎么样" spellcheck="false"></textarea>
+
+    <div class="invite-opts">
+      <label class="inv-opt"><input type="checkbox" id="inviteThink"> 深度思考</label>
+      <label class="inv-opt"><input type="checkbox" id="inviteSearch"> 联网搜索</label>
+    </div>
+    <div class="field-tip" id="inviteOptTip">默认沿用这个对话的设置，也可以临时改（Pro 模型不支持搜索）</div>
+
+    <div class="svc-actions">
+      <button class="wide-btn primary" id="btnInviteSend" type="button">发送邀请</button>
     </div>
   </div>
 </section>
